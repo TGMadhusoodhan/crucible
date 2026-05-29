@@ -9,17 +9,31 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.100.1",
+    "@clerk/nextjs": "^7.4.2",
+    "@neondatabase/serverless": "^1.1.0",
+    "@upstash/ratelimit": "^2.0.8",
+    "@upstash/redis": "^1.38.0",
+    "ai": "^6.0.193",
+    "dotenv-flow": "^4.1.0",
+    "drizzle-kit": "^0.31.10",
+    "drizzle-orm": "^0.45.2",
     "next": "16.2.6",
+    "openai": "^6.39.1",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@sentry/nextjs": "^10.55.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
+    "prettier": "^3.8.3",
+    "prettier-plugin-tailwindcss": "^0.8.0",
     "tailwindcss": "^4",
     "typescript": "^5"
   }
