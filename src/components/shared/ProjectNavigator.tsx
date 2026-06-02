@@ -1,0 +1,553 @@
+'use client'
+
+import Link from 'next/link'
+import { useCallback, useEffect, useState } from 'react'
+import { usePipelineDispatch, usePipelineState } from '@/store'
+import { cn } from '@/lib/utils'
+import { pickProjectFolder, readOutputFromFolder, isFileSystemAccessSupported } from '@/lib/localfs'
+import type { Provider } from '@/types'
+
+const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together'] as const
+
+// ─── Model catalogue ──────────────────────────────────────────────────────────
+
+interface ModelOption {
+  id:           string
+  label:        string
+  recommended?: boolean
+  note?:        string
+}
+
+const PROVIDER_MODELS: Record<Provider, ModelOption[]> = {
+  deepseek: [
+    { id: 'deepseek-v4-pro',   label: 'DeepSeek V4 Pro',   recommended: true, note: '80.6% SWE-bench · best coder' },
+    { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash',  note: 'fast & cheap' },
+    { id: 'deepseek-chat',     label: 'DeepSeek V3 Chat',   note: 'V3 fallback' },
+    { id: 'deepseek-reasoner', label: 'DeepSeek R1',        note: 'reasoning model' },
+  ],
+  anthropic: [
+    { id: 'claude-sonnet-4-6',          label: 'Claude Sonnet 4.6', recommended: true, note: 'best reviewer' },
+    { id: 'claude-opus-4-8',            label: 'Claude Opus 4.8',   note: 'most capable' },
+    { id: 'claude-haiku-4-5-20251001',  label: 'Claude Haiku 4.5',  note: 'fast & cheap' },
+  ],
+  openai: [
+    { id: 'gpt-4o',      label: 'GPT-4o',       recommended: true },
+    { id: 'gpt-5-4',     label: 'GPT-5.4' },
+    { id: 'gpt-5-5',     label: 'GPT-5.5',      note: 'most capable' },
+    { id: 'gpt-4o-mini', label: 'GPT-4o Mini',  note: 'fast & cheap' },
+  ],
+  google: [
+    { id: 'gemini-pro',         label: 'Gemini Pro',         recommended: true },
+    { id: 'gemini-flash',       label: 'Gemini Flash',       note: 'fast' },
+    { id: 'gemini-2.0-flash',   label: 'Gemini 2.0 Flash' },
+    { id: 'gemini-1.5-pro',     label: 'Gemini 1.5 Pro' },
+  ],
+  mistral: [
+    { id: 'mistral-large', label: 'Mistral Large',    recommended: true },
+    { id: 'codestral',     label: 'Codestral',        note: 'coding specialist' },
+    { id: 'mistral-small', label: 'Mistral Small',    note: 'fast' },
+  ],
+  openrouter: [
+    { id: 'openai/gpt-4o',                    label: 'GPT-4o',               recommended: true },
+    { id: 'anthropic/claude-sonnet-4-6',      label: 'Claude Sonnet 4.6' },
+    { id: 'deepseek/deepseek-v4-pro',         label: 'DeepSeek V4 Pro' },
+    { id: 'meta-llama/llama-3.1-405b',        label: 'Llama 3.1 405B' },
+    { id: 'google/gemini-pro',                label: 'Gemini Pro' },
+    { id: 'mistralai/mistral-large',          label: 'Mistral Large' },
+  ],
+  groq: [
+    { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B', recommended: true },
+    { id: 'llama-3.1-70b-versatile', label: 'Llama 3.1 70B' },
+    { id: 'mixtral-8x7b-32768',      label: 'Mixtral 8x7B' },
+    { id: 'gemma2-9b-it',            label: 'Gemma 2 9B',   note: 'fast' },
+  ],
+  together: [
+    { id: 'meta-llama/Llama-3.3-70B-Instruct',    label: 'Llama 3.3 70B',    recommended: true },
+    { id: 'meta-llama/Llama-3.1-70B-Instruct',    label: 'Llama 3.1 70B' },
+    { id: 'mistralai/Mixtral-8x7B-Instruct-v0.1', label: 'Mixtral 8x7B' },
+    { id: 'Qwen/Qwen2.5-Coder-32B-Instruct',      label: 'Qwen 2.5 Coder 32B', note: 'coding' },
+  ],
+}
+
+function defaultModelId(provider: Provider): string {
+  return PROVIDER_MODELS[provider].find((m) => m.recommended)?.id
+    ?? PROVIDER_MODELS[provider][0]?.id
+    ?? ''
+}
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface Project {
+  id: string
+  name: string
+  description: string
+  primaryProvider: Provider
+  primaryModelId: string
+  reviewerProvider: Provider
+  reviewerModelId: string
+  createdAt: number
+}
+
+// ─── Main navigator ───────────────────────────────────────────────────────────
+
+export function ProjectNavigator() {
+  const dispatch              = usePipelineDispatch()
+  const { project }           = usePipelineState()
+  const [projects, setProjects]   = useState<Project[]>([])
+  const [showNew, setShowNew]     = useState(false)
+  const [deleting, setDeleting]   = useState<string | null>(null)
+
+  const loadProjects = useCallback(async () => {
+    const res = await fetch('/api/projects')
+    if (res.ok) {
+      const data = await res.json() as { success: boolean; data?: Project[] }
+      if (data.success && data.data) setProjects(data.data)
+    }
+  }, [])
+
+  useEffect(() => { void loadProjects() }, [loadProjects])
+
+  function selectProject(p: Project) {
+    dispatch({
+      type: 'SET_PROJECT',
+      project: {
+        id:               p.id,
+        name:             p.name,
+        primaryProvider:  p.primaryProvider,
+        primaryModelId:   p.primaryModelId,
+        reviewerProvider: p.reviewerProvider,
+        reviewerModelId:  p.reviewerModelId,
+      },
+    })
+    // Try to restore the last completed session from the user's local folder.
+    // This is async — if no folder is linked or no output exists, fall back to RESET_SESSION.
+    readOutputFromFolder(p.id)
+      .then((saved) => {
+        if (saved?.output) {
+          dispatch({ type: 'RESTORE_SESSION', output: saved.output, spec: saved.spec })
+        } else {
+          dispatch({ type: 'RESET_SESSION' })
+        }
+      })
+      .catch(() => dispatch({ type: 'RESET_SESSION' }))
+  }
+
+  async function deleteProject(e: React.MouseEvent, id: string) {
+    e.stopPropagation()
+    if (!window.confirm('Delete this project?')) return
+    setDeleting(id)
+    try {
+      await fetch(`/api/projects/${id}`, { method: 'DELETE' })
+      if (project?.id === id) dispatch({ type: 'CLEAR_PROJECT' })
+      await loadProjects()
+    } finally {
+      setDeleting(null)
+    }
+  }
+
+  return (
+    <div className="flex h-full flex-col border-r border-zinc-800 bg-zinc-950">
+      <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
+        <span className="text-xs font-semibold text-zinc-300">Projects</span>
+        <button
+          onClick={() => setShowNew(true)}
+          className="rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-700 transition-colors"
+        >
+          + New
+        </button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-2 space-y-1">
+        {projects.length === 0 && (
+          <div className="px-2 pt-6 text-center space-y-3">
+            <p className="text-xs text-zinc-600">No projects yet.</p>
+            <p className="text-[11px] text-zinc-700">
+              First{' '}
+              <Link href="/settings" className="text-zinc-500 underline underline-offset-2 hover:text-zinc-300">
+                add your API keys
+              </Link>
+              , then create a project.
+            </p>
+          </div>
+        )}
+        {projects.map((p) => (
+          <div
+            key={p.id}
+            className={cn(
+              'group flex items-center gap-1 rounded transition-colors',
+              p.id === project?.id ? 'bg-zinc-800' : 'hover:bg-zinc-800/50',
+            )}
+          >
+            <button
+              onClick={() => selectProject(p)}
+              className={cn(
+                'min-w-0 flex-1 px-3 py-2 text-left',
+                p.id === project?.id ? 'text-zinc-100' : 'text-zinc-400 group-hover:text-zinc-300',
+              )}
+            >
+              <p className="text-xs font-medium truncate">{p.name}</p>
+              <p className="text-[10px] text-zinc-600 truncate">
+                {p.primaryModelId} → {p.reviewerModelId}
+              </p>
+            </button>
+            <button
+              onClick={(e) => void deleteProject(e, p.id)}
+              disabled={deleting === p.id}
+              title="Delete project"
+              className="mr-1 shrink-0 rounded p-1 text-zinc-700 opacity-0 group-hover:opacity-100 hover:bg-red-950/60 hover:text-red-400 transition-all disabled:opacity-30"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3 w-3">
+                <path fillRule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5a.75.75 0 0 1 .786-.711Z" clipRule="evenodd" />
+              </svg>
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {showNew && (
+        <NewProjectModal
+          onClose={() => setShowNew(false)}
+          onCreated={(created) => {
+            setShowNew(false)
+            void loadProjects()
+            selectProject(created)  // auto-select the newly created project
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+// ─── New project modal ────────────────────────────────────────────────────────
+
+interface CredStatus { provider: string; isValid: boolean }
+
+function NewProjectModal({ onClose, onCreated }: { onClose: () => void; onCreated: (project: Project) => void }) {
+  const [form, setForm] = useState({
+    name:             '',
+    description:      '',
+    primaryProvider:  'deepseek'  as Provider,
+    primaryModelId:   defaultModelId('deepseek'),
+    reviewerProvider: 'anthropic' as Provider,
+    reviewerModelId:  defaultModelId('anthropic'),
+  })
+  const [saving,       setSaving]      = useState(false)
+  const [error,        setError]       = useState('')
+  const [credMap,      setCredMap]     = useState<Record<string, boolean>>({})
+  // Step 2: link local folder after project is created
+  const [createdProject, setCreatedProject] = useState<Project | null>(null)
+  const [folderPicking,  setFolderPicking]  = useState(false)
+  const [folderName,     setFolderName]     = useState<string | null>(null)
+
+  // Load which providers have valid keys so we can show ✓/✗
+  useEffect(() => {
+    fetch('/api/credentials')
+      .then((r) => r.json() as Promise<{ success: boolean; data?: CredStatus[] }>)
+      .then((d) => {
+        if (d.success && d.data) {
+          const map: Record<string, boolean> = {}
+          d.data.forEach((c) => { map[c.provider] = c.isValid })
+          setCredMap(map)
+        }
+      })
+      .catch(() => { /* non-blocking */ })
+  }, [])
+
+  function setPrimaryProvider(provider: Provider) {
+    setForm((f) => ({ ...f, primaryProvider: provider, primaryModelId: defaultModelId(provider) }))
+  }
+
+  function setReviewerProvider(provider: Provider) {
+    setForm((f) => ({ ...f, reviewerProvider: provider, reviewerModelId: defaultModelId(provider) }))
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!form.name.trim()) { setError('Name is required'); return }
+    setSaving(true)
+    const res  = await fetch('/api/projects', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(form),
+    })
+    const data = await res.json() as { success: boolean; data?: Project; error?: string }
+    if (data.success && data.data) {
+      setSaving(false)
+      setCreatedProject(data.data)   // advance to step 2 (link folder)
+    } else {
+      setError(data.error ?? 'Failed to create project')
+      setSaving(false)
+    }
+  }
+
+  // ─── Step 2: link local folder ────────────────────────────────────────────────
+  if (createdProject) {
+    async function handlePickFolder() {
+      setFolderPicking(true)
+      try {
+        const handle = await pickProjectFolder(createdProject!.id)
+        if (handle) setFolderName(handle.name)
+      } finally {
+        setFolderPicking(false)
+      }
+    }
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+        <div className="w-full max-w-sm rounded-xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl space-y-4">
+          <div>
+            <h2 className="text-sm font-semibold text-zinc-100">Link a local folder</h2>
+            <p className="mt-1 text-xs text-zinc-500">
+              Pick a folder on your computer. When the pipeline finishes, the generated code
+              will be saved there automatically — and restored the next time you open this project.
+            </p>
+          </div>
+
+          {folderName ? (
+            <div className="rounded border border-emerald-800 bg-emerald-950/40 px-3 py-2">
+              <p className="text-xs text-emerald-400">✓ Linked: <span className="font-mono">{folderName}</span></p>
+            </div>
+          ) : isFileSystemAccessSupported() ? (
+            <button
+              onClick={handlePickFolder}
+              disabled={folderPicking}
+              className="w-full rounded border border-zinc-700 py-2.5 text-sm text-zinc-200 hover:bg-zinc-800 disabled:opacity-40 transition-colors"
+            >
+              {folderPicking ? 'Opening picker…' : '📁 Pick folder'}
+            </button>
+          ) : (
+            <p className="text-xs text-zinc-500 rounded border border-zinc-800 px-3 py-2.5">
+              Local folder save requires Chrome or Edge. You can still copy code from the output panel.
+            </p>
+          )}
+
+          <div className="flex gap-2 pt-1">
+            <button
+              onClick={() => onCreated(createdProject!)}
+              className="flex-1 rounded border border-zinc-700 py-2 text-sm text-zinc-400 hover:bg-zinc-800 transition-colors"
+            >
+              Skip for now
+            </button>
+            <button
+              onClick={() => onCreated(createdProject!)}
+              className="flex-1 rounded bg-zinc-100 py-2 text-sm font-semibold text-zinc-900 hover:bg-white transition-colors"
+            >
+              {folderName ? 'Done' : 'Skip'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+      <div className="w-full max-w-lg rounded-xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl">
+        <h2 className="mb-1 text-sm font-semibold text-zinc-100">New project</h2>
+        <p className="mb-4 text-xs text-zinc-500">
+          Recommended: DeepSeek V4 Pro as coder + Claude Sonnet as reviewer.
+        </p>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <Field label="Project name">
+            <input
+              className={INPUT_CLS}
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              placeholder="My project"
+              autoFocus
+            />
+          </Field>
+
+          {/* Primary coder */}
+          <div className="rounded-lg border border-zinc-800 p-3 space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
+                Primary coder — generates code
+              </p>
+              <KeyBadge provider={form.primaryProvider} credMap={credMap} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Provider">
+                <ProviderSelect value={form.primaryProvider} onChange={setPrimaryProvider} />
+              </Field>
+              <Field label="Model">
+                <ModelSelect
+                  provider={form.primaryProvider}
+                  value={form.primaryModelId}
+                  onChange={(id) => setForm({ ...form, primaryModelId: id })}
+                />
+              </Field>
+            </div>
+          </div>
+
+          {/* Reviewer */}
+          <div className="rounded-lg border border-zinc-800 p-3 space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
+                Reviewer — pseudo-code hints only, never full code
+              </p>
+              <KeyBadge provider={form.reviewerProvider} credMap={credMap} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Provider">
+                <ProviderSelect value={form.reviewerProvider} onChange={setReviewerProvider} />
+              </Field>
+              <Field label="Model">
+                <ModelSelect
+                  provider={form.reviewerProvider}
+                  value={form.reviewerModelId}
+                  onChange={(id) => setForm({ ...form, reviewerModelId: id })}
+                />
+              </Field>
+            </div>
+          </div>
+
+          {error && <p className="text-xs text-red-400">{error}</p>}
+
+          <div className="flex gap-2 pt-1">
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-1 rounded border border-zinc-700 py-2 text-sm text-zinc-400 hover:bg-zinc-800 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={saving}
+              className="flex-1 rounded bg-zinc-100 py-2 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-40 transition-colors"
+            >
+              {saving ? 'Creating…' : 'Create project'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+// ─── Shared sub-components ────────────────────────────────────────────────────
+
+const INPUT_CLS = 'w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-zinc-500 cursor-pointer'
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="mb-1 block text-[10px] font-medium text-zinc-500 uppercase tracking-wide">
+        {label}
+      </label>
+      {children}
+    </div>
+  )
+}
+
+function KeyBadge({ provider, credMap }: { provider: Provider; credMap: Record<string, boolean> }) {
+  if (!(provider in credMap)) {
+    return (
+      <Link href="/settings" className="text-[10px] text-red-400 hover:underline">
+        ✗ No key — add in Settings
+      </Link>
+    )
+  }
+  if (!credMap[provider]) {
+    return (
+      <Link href="/settings" className="text-[10px] text-orange-400 hover:underline">
+        ⚠ Key invalid — update in Settings
+      </Link>
+    )
+  }
+  return (
+    <span className="text-[10px] text-emerald-500">✓ Key connected</span>
+  )
+}
+
+function ProviderSelect({ value, onChange }: { value: Provider; onChange: (v: Provider) => void }) {
+  return (
+    <select
+      className={INPUT_CLS}
+      value={value}
+      onChange={(e) => onChange(e.target.value as Provider)}
+    >
+      {PROVIDERS.map((p) => (
+        <option key={p} value={p}>{p}</option>
+      ))}
+    </select>
+  )
+}
+
+function ModelSelect({
+  provider,
+  value,
+  onChange,
+}: {
+  provider: Provider
+  value: string
+  onChange: (id: string) => void
+}) {
+  const [liveModels, setLiveModels] = useState<string[]>([])
+  const [loading,    setLoading]    = useState(false)
+  const [error,      setError]      = useState('')
+
+  // Try to fetch real model IDs from the provider when it changes
+  useEffect(() => {
+    setLiveModels([])
+    setError('')
+    setLoading(true)
+    fetch(`/api/models/${provider}`)
+      .then((r) => r.json() as Promise<{ success: boolean; data?: string[]; error?: string }>)
+      .then((d) => {
+        if (d.success && d.data?.length) setLiveModels(d.data)
+        else setError(d.error ?? '')
+      })
+      .catch(() => setError(''))
+      .finally(() => setLoading(false))
+  }, [provider])
+
+  const fallback = PROVIDER_MODELS[provider]
+
+  // If live models loaded, show them; otherwise fall back to the curated list
+  if (loading) {
+    return (
+      <select className={INPUT_CLS} disabled>
+        <option>Loading models…</option>
+      </select>
+    )
+  }
+
+  if (liveModels.length > 0) {
+    return (
+      <select
+        className={INPUT_CLS}
+        value={liveModels.includes(value) ? value : liveModels[0]}
+        onChange={(e) => onChange(e.target.value)}
+      >
+        {liveModels.map((id) => (
+          <option key={id} value={id}>{id}</option>
+        ))}
+      </select>
+    )
+  }
+
+  // Fallback to curated list (no API key yet, or provider didn't return models)
+  return (
+    <div>
+      <select
+        className={INPUT_CLS}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      >
+        {fallback.map((m) => (
+          <option key={m.id} value={m.id}>
+            {m.recommended ? '★ ' : ''}{m.label}{m.note ? ` — ${m.note}` : ''}
+          </option>
+        ))}
+      </select>
+      {error && (
+        <p className="mt-1 text-[10px] text-zinc-600">
+          {error.includes('No API key') ? 'Add API key in Settings to see live models' : 'Using preset list'}
+        </p>
+      )}
+    </div>
+  )
+}
