@@ -541,7 +541,11 @@ export async function runPipeline(
 
   if (state.phase === 'phase2_spec_confirm') return
 
-  // ─── Phase 3 loop: Generate → Self-Check → Review → Consensus ────────────
+  // ─── Phase 3 loop: Generate → Review → Consensus ────────────────────────
+  // Split across two Vercel function invocations per round to avoid timeout:
+  //   Invocation A (phase3_generating): stream tokens + self-check → returns
+  //   Invocation B (phase3_reviewing):  review + consensus → loops or done
+  // The client auto-reconnects between invocations (see usePipeline AUTO_RECONNECT_PHASES).
 
   while (
     state.phase === 'phase3_generating' ||
@@ -551,103 +555,110 @@ export async function runPipeline(
   ) {
     if (await maybeStop()) return
 
-    // Inject any pending human overrides into the context for this round
     const overrideText = consumePendingOverrides(state.pendingHumanOverrides)
     state.pendingHumanOverrides = []
-
     const ctx = buildContext(state, overrideText)
 
-    // ── Generate ────────────────────────────────────────────────────────────
+    // ── Invocation A: Generate + Self-Check ──────────────────────────────────
 
-    let code: string
-    try {
-      const genResult = await runPhase3Generate(
-        projectId, sessionId, state.round, ctx, primary, emit,
-        state.lastReview && !state.lastReview.consensus ? state.lastReview : undefined,
-        state.generatedCode,  // the code from the previous round — used in patch mode
-      )
-      code                  = genResult.code
-      state.generatedCode   = code
-      state.selfCheckOutput = genResult.selfCheckOutput
-      recordAndRefreshBudget(state, config.primaryProvider, config.primaryModelId,
-        estimateTokens(ctx.taskDescription), genResult.tokensOut, emit)
-      state = await transition(state, 'phase3_reviewing')
-    } catch (err) {
-      await handleError(state, err, emit)
-      return
+    if (state.phase === 'phase3_generating' || state.phase === 'phase3_self_check') {
+      try {
+        const genResult = await runPhase3Generate(
+          projectId, sessionId, state.round, ctx, primary, emit,
+          state.lastReview && !state.lastReview.consensus ? state.lastReview : undefined,
+          state.generatedCode,
+        )
+        state.generatedCode   = genResult.code
+        state.selfCheckOutput = genResult.selfCheckOutput
+        recordAndRefreshBudget(state, config.primaryProvider, config.primaryModelId,
+          estimateTokens(ctx.taskDescription), genResult.tokensOut, emit)
+        state = await transition(state, 'phase3_reviewing')
+        // Return so the SSE stream closes. The client sees phase3_reviewing and
+        // immediately reconnects. The new invocation picks up at phase3_reviewing below.
+        return
+      } catch (err) {
+        await handleError(state, err, emit)
+        return
+      }
     }
 
     if (await maybeStop()) return
 
-    // ── Review ───────────────────────────────────────────────────────────────
+    // ── Invocation B: Review ─────────────────────────────────────────────────
+    // state.generatedCode was saved to Redis by Invocation A.
 
-    let review: ReviewPayload
-    try {
-      review = await runPhase3Review(
-        projectId, sessionId, code, ctx, reviewer,
-        state.round, emit, state.lastReview,
-      )
-      state.lastReview = review
+    if (state.phase === 'phase3_reviewing') {
+      const code = state.generatedCode!
+      let review: ReviewPayload
+      try {
+        review = await runPhase3Review(
+          projectId, sessionId, code, ctx, reviewer,
+          state.round, emit, state.lastReview,
+        )
+        state.lastReview = review
 
-      // Append this round's exchange to conversation history so both models have
-      // full context in subsequent rounds (summary of code + reviewer reasoning).
-      const now = Date.now()
-      state.conversationHistory = [
-        ...state.conversationHistory,
-        {
-          role:      'assistant' as const,
-          content:   `[Round ${state.round} generated code — ${code.length} chars]`,
-          timestamp: now,
-        },
-        {
-          role:      'user' as const,
-          content:   `[Round ${state.round} reviewer feedback] ${review.reasoning} Flags: ${
-            review.flags.map(f => `[${f.severity}] ${f.description}`).join(' | ')
-          }`,
-          timestamp: now,
-        },
-      ]
+        const now = Date.now()
+        state.conversationHistory = [
+          ...state.conversationHistory,
+          {
+            role:      'assistant' as const,
+            content:   `[Round ${state.round} generated code — ${code.length} chars]`,
+            timestamp: now,
+          },
+          {
+            role:      'user' as const,
+            content:   `[Round ${state.round} reviewer feedback] ${review.reasoning} Flags: ${
+              review.flags.map(f => `[${f.severity}] ${f.description}`).join(' | ')
+            }`,
+            timestamp: now,
+          },
+        ]
 
-      recordAndRefreshBudget(state, config.reviewerProvider, config.reviewerModelId,
-        estimateTokens(code), estimateTokens(JSON.stringify(review)), emit)
-      state = await transition(state, 'phase3_consensus')
-    } catch (err) {
-      await handleError(state, err, emit)
-      return
+        recordAndRefreshBudget(state, config.reviewerProvider, config.reviewerModelId,
+          estimateTokens(code), estimateTokens(JSON.stringify(review)), emit)
+        state = await transition(state, 'phase3_consensus')
+      } catch (err) {
+        await handleError(state, err, emit)
+        return
+      }
     }
 
     if (await maybeStop()) return
 
     // ── Consensus ────────────────────────────────────────────────────────────
 
-    let decision: Awaited<ReturnType<typeof runPhase3Consensus>>
-    try {
-      decision = await runPhase3Consensus(
-        projectId, sessionId, code, review, ctx, emit,
-      )
-    } catch (err) {
-      await handleError(state, err, emit)
-      return
-    }
+    if (state.phase === 'phase3_consensus') {
+      const code   = state.generatedCode!
+      const review = state.lastReview!
 
-    if (decision.promote) {
-      state.output = decision.output
-      // Persist to long-lived Redis key so any device can restore this session.
-      // Fire-and-forget — never block the pipeline on this.
-      saveProjectOutput(state.userId, state.projectId, decision.output!, state.spec ?? null, state.sessionId)
-        .catch(err => console.error('[orchestrator] saveProjectOutput failed:', err))
-      state = await transition(state, 'complete')
-      return
-    }
+      let decision: Awaited<ReturnType<typeof runPhase3Consensus>>
+      try {
+        decision = await runPhase3Consensus(
+          projectId, sessionId, code, review, ctx, emit,
+        )
+      } catch (err) {
+        await handleError(state, err, emit)
+        return
+      }
 
-    if (decision.escalate) {
-      state = await transition(state, 'conflict_escalated')
-      return  // ← Human input gate: wait for resolveConflict()
-    }
+      if (decision.promote) {
+        state.output = decision.output
+        saveProjectOutput(state.userId, state.projectId, decision.output!, state.spec ?? null, state.sessionId)
+          .catch(err => console.error('[orchestrator] saveProjectOutput failed:', err))
+        state = await transition(state, 'complete')
+        return
+      }
 
-    // No consensus, no escalation → increment round and retry
-    state.round += 1
-    state = await transition(state, 'phase3_generating')
+      if (decision.escalate) {
+        state = await transition(state, 'conflict_escalated')
+        return
+      }
+
+      // No consensus → next round generates a patch; loop back
+      state.round += 1
+      state = await transition(state, 'phase3_generating')
+      // While loop continues; generate block runs next iteration (returns again)
+    }
   }
 
   // ─── Gate: waiting for conflict resolution ────────────────────────────────

@@ -4,6 +4,11 @@ import { serializeHeartbeat } from '@/lib/conversation/event-log'
 import { captureApiError } from '@/lib/sentry'
 import type { SSEEvent } from '@/types'
 
+// Vercel Pro supports up to 800s. Set to maximum so long generation runs don't hit
+// the default 300s limit mid-self-check. The generation→review reconnect split (below)
+// further reduces per-invocation time, but maxDuration is the safety net.
+export const maxDuration = 800
+
 const HEARTBEAT_MS = 15_000  // keep connection alive while pipeline is running
 
 // GET /api/pipeline/stream?sessionId=xxx
@@ -32,10 +37,12 @@ export async function GET(request: Request): Promise<Response> {
     return new Response('Forbidden', { status: 403 })
   }
 
-  // Phases where we don't need to run the pipeline — client is waiting to give input
+  // Human-input gates: client waits for user action before reconnecting.
+  // Pipeline-split phases: client reconnects immediately, no user action needed.
   const GATE_PHASES = new Set([
     'phase2_answering', 'phase2_spec_confirm', 'conflict_escalated',
     'paused', 'stopped', 'complete', 'error',
+    'phase3_reviewing',  // split point: generation done, reconnect for review
   ])
 
   const encoder = new TextEncoder()
@@ -77,9 +84,13 @@ export async function GET(request: Request): Promise<Response> {
       const currentState = await getSessionState(sessionId)
       if (!currentState) { close(); return }
 
-      if (GATE_PHASES.has(currentState.phase) && currentState.phase !== 'paused') {
-        // If paused: client reconnects after play — we should run the pipeline
-        // For all other gate phases: just report current state and close
+      // Human gates: report current phase and wait for user action.
+      // phase3_reviewing: do NOT close here — run the pipeline for the review step.
+      // paused: do NOT close here — run the pipeline to resume.
+      const isHumanGate = GATE_PHASES.has(currentState.phase)
+        && currentState.phase !== 'paused'
+        && currentState.phase !== 'phase3_reviewing'
+      if (isHumanGate) {
         send({ type: 'phase_change', phase: currentState.phase })
         close()
         return
@@ -97,13 +108,10 @@ export async function GET(request: Request): Promise<Response> {
         // Pipeline returned — check why
         const finalState = await getSessionState(sessionId)
         if (finalState && !GATE_PHASES.has(finalState.phase)) {
-          // Unexpected exit — shouldn't happen, but emit an error to inform the client
           send({ type: 'error', message: 'Pipeline exited unexpectedly', phase: finalState.phase })
         } else if (finalState && finalState.phase !== 'error') {
-          // Reached a human-input gate — tell the client which phase we stopped at.
-          // Skip 'error': the pipeline already sent an explicit { type: 'error' } event.
-          // Sending phase_change: error here would overwrite the error message with null
-          // via the SET_PHASE reducer (which clears error on every phase transition).
+          // Reached a gate or split point. Send the phase so the client knows
+          // whether to wait for user input or reconnect automatically.
           send({ type: 'phase_change', phase: finalState.phase })
         }
       } catch (err) {

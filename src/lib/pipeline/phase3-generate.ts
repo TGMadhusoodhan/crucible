@@ -14,10 +14,10 @@ import type {
 const MAX_SELF_CHECK_PASSES = 2
 
 // Two-tier idle timeouts for streaming generation.
-// First token: models can think silently for minutes before streaming starts.
-// Inter-token: once streaming begins, long gaps indicate a real hang.
-const FIRST_TOKEN_TIMEOUT_MS = 600_000  // 10 min — reasoning models think before first token
-const INTER_TOKEN_TIMEOUT_MS =  90_000  // 90s — gaps between tokens should be short
+// First token: model may think silently before first token (reasoning models).
+// Inter-token: once streaming, long gaps mean a real hang.
+const FIRST_TOKEN_TIMEOUT_MS = 300_000  // 5 min — generous for reasoning models
+const INTER_TOKEN_TIMEOUT_MS =  60_000  // 1 min between tokens
 
 // ─── Streaming code generation with idle timeout ──────────────────────────────
 

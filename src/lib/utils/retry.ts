@@ -4,10 +4,10 @@
 //   - Backoff: 1s → 2s → 4s
 //   - Timeout: 120s for generate(), 60s for all other calls
 
-export const TIMEOUT_GENERATE_MS = 300_000  // 5 min
-export const TIMEOUT_THINK_MS   = 480_000  // 8 min — DeepSeek V4 Pro is very slow on complex prompts
-export const TIMEOUT_REVIEW_MS  = 300_000  // 5 min — reviewer reads full generated code
-export const TIMEOUT_DEFAULT_MS = 120_000  // 2 min — alignment chat, self-check
+export const TIMEOUT_GENERATE_MS = 300_000  // 5 min (unused — generation uses per-token timeouts)
+export const TIMEOUT_THINK_MS   = 180_000  // 3 min — thinking call per model
+export const TIMEOUT_REVIEW_MS  = 180_000  // 3 min — reviewer reads full generated code
+export const TIMEOUT_DEFAULT_MS =  90_000  // 1.5 min — alignment chat, self-check
 
 // ─── Timeout wrapper ──────────────────────────────────────────────────────────
 

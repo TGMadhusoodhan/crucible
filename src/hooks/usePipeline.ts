@@ -52,16 +52,24 @@ function connectSSE(
 
 // ─── Main hook ────────────────────────────────────────────────────────────────
 
+// Phases where the pipeline split itself to avoid Vercel timeout — client
+// reconnects immediately without waiting for user input.
+const AUTO_RECONNECT_PHASES = new Set(['phase3_reviewing'])
+
 export function usePipeline() {
   const state    = usePipelineState()
   const dispatch = usePipelineDispatch()
   const abortRef = useRef<AbortController | null>(null)
+  // Tracks the last phase received via SSE so connectToStream can decide
+  // whether to auto-reconnect after the stream closes.
+  const lastPhaseRef = useRef<string>('idle')
 
   // ─── Event dispatcher ──────────────────────────────────────────────────────
 
   const handleSSEEvent = useCallback((event: SSEEvent) => {
     switch (event.type) {
       case 'phase_change':
+        lastPhaseRef.current = event.phase
         dispatch({ type: 'SET_PHASE', phase: event.phase })
         break
       case 'thinking_done':
@@ -132,11 +140,18 @@ export function usePipeline() {
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') return
       dispatch({ type: 'SET_ERROR', error: err instanceof Error ? err.message : 'Stream error' })
+      return
     } finally {
       if (abortRef.current === controller) {
         abortRef.current = null
         dispatch({ type: 'SET_STREAMING', value: false })
       }
+    }
+
+    // If the pipeline split itself at a non-human gate (e.g. generation→review),
+    // immediately reconnect to continue in a new Vercel function invocation.
+    if (AUTO_RECONNECT_PHASES.has(lastPhaseRef.current)) {
+      void connectToStream(sessionId)
     }
   }, [dispatch, handleSSEEvent])
 
