@@ -1,101 +1,61 @@
-import fs from 'fs/promises'
-import os from 'os'
-import path from 'path'
-import { z } from 'zod'
+// Redis-backed storage — replaces the Node.js filesystem layer.
+// Works identically on Vercel serverless and local dev.
+// Public API is unchanged so no other file needs to be updated.
+
+import { Redis } from '@upstash/redis'
 import type { ConversationEvent, ProjectMemory, ReviewFlag, SpecDocument } from '@/types'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const CRUCIBLE_DIR    = path.join(os.homedir(), '.crucible', 'projects')
-const CHARS_PER_TOKEN = 4
-const MAX_LOG_TOKENS  = 40_000
+const CHARS_PER_TOKEN  = 4
+const MAX_LOG_TOKENS   = 40_000
+const MAX_LOG_ENTRIES  = 10_000   // list cap — trims oldest on append
+const MAX_REVIEW_ITEMS = 1_000
+const MAX_CHECKPOINTS  = 100
 
-// ─── Filesystem availability ──────────────────────────────────────────────────
-// Vercel and other serverless runtimes have a read-only filesystem outside /tmp.
-// We test write access once and cache the result so the pipeline never crashes
-// on a filesystem error — writes are best-effort informational logging only.
-// The pipeline state lives in Redis; filesystem is supplementary.
+const TTL_LOG  = 60 * 60 * 24 * 90    // session logs: 90 days
+const TTL_DATA = 60 * 60 * 24 * 365   // project data: 1 year
 
-let _canWrite: boolean | null = null
+// ─── Redis keys ───────────────────────────────────────────────────────────────
 
-async function canWrite(): Promise<boolean> {
-  if (_canWrite !== null) return _canWrite
-  try {
-    await fs.mkdir(CRUCIBLE_DIR, { recursive: true })
-    _canWrite = true
-  } catch {
-    _canWrite = false
-    console.warn('[crucible/filesystem] Server filesystem is read-only — session logs and checkpoints disabled. Pipeline runs normally.')
-  }
-  return _canWrite
+const KEY = {
+  sessionLog:  (pid: string)              => `fs:${pid}:session_log`,
+  memory:      (pid: string)              => `fs:${pid}:memory`,
+  spec:        (pid: string)              => `fs:${pid}:spec`,
+  reviewList:  (pid: string)              => `fs:${pid}:reviews`,
+  config:      (pid: string)              => `fs:${pid}:config`,
+  checkpoints: (pid: string)              => `fs:${pid}:checkpoints`,
+  output:      (pid: string, f: string)   => `fs:${pid}:output:${f}`,
+  outputIndex: (pid: string)              => `fs:${pid}:output_files`,
 }
 
-// ─── Path helpers ─────────────────────────────────────────────────────────────
+function getRedis(): Redis {
+  return new Redis({
+    url:   process.env.UPSTASH_REDIS_REST_URL!,
+    token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+  })
+}
 
-export function projectDir(id: string)     { return path.join(CRUCIBLE_DIR, id) }
-function memoryPath(id: string)            { return path.join(projectDir(id), 'memory.json') }
-function sessionLogPath(id: string)        { return path.join(projectDir(id), 'session_log.jsonl') }
-function specPath(id: string)              { return path.join(projectDir(id), 'spec.json') }
-function reviewListPath(id: string)        { return path.join(projectDir(id), 'review_list.json') }
-function configPath(id: string)            { return path.join(projectDir(id), 'config.json') }
-function checkpointsDir(id: string)        { return path.join(projectDir(id), 'checkpoints') }
-function outputDir(id: string)             { return path.join(projectDir(id), 'output') }
+// Upstash may return list items as already-parsed objects or raw strings.
+// This helper handles both cases.
+function parseItem<T>(item: unknown): T | null {
+  if (item === null || item === undefined) return null
+  if (typeof item === 'string') {
+    try { return JSON.parse(item) as T } catch { return null }
+  }
+  return item as T
+}
 
-// ─── Zod schemas ──────────────────────────────────────────────────────────────
+// ─── Kept for backward compat (path helpers no longer meaningful) ─────────────
 
-const decisionSchema = z.object({
-  id:          z.string(),
-  description: z.string(),
-  reason:      z.string(),
-  timestamp:   z.number(),
-})
+export function projectDir(_id: string): string { return '' }
+export const ensureProjectDir = async (_id: string) => {}
 
-const conflictSchema = z.object({
-  id:               z.string(),
-  primaryPosition:  z.string(),
-  reviewerPosition: z.string(),
-  resolvedAt:       z.number().optional(),
-  resolution:       z.string().optional(),
-})
+// ─── Project init (no-op — Redis needs no directory creation) ────────────────
 
-const activeMemorySchema = z.object({
-  current_module:       z.string(),
-  open_questions:       z.array(z.string()),
-  file_structure:       z.record(z.string(), z.unknown()),
-  recent_decisions:     z.array(decisionSchema),
-  current_tech_stack:   z.array(z.string()),
-  unresolved_conflicts: z.array(conflictSchema),
-})
+export async function initProject(_projectId: string): Promise<void> {}
 
-const archiveMemorySchema = z.object({
-  completed_modules:     z.array(z.object({
-    name:                 z.string(),
-    description:          z.string(),
-    completedAt:          z.number(),
-    interfaceDescription: z.string(),
-  })),
-  resolved_decisions:    z.array(decisionSchema),
-  earlier_architecture:  z.array(z.string()),
-  deprecated_approaches: z.array(z.string()),
-})
-
-const memorySchema = z.object({
-  active:  activeMemorySchema,
-  archive: archiveMemorySchema,
-})
-
-const checkpointSchema = z.object({
-  id:             z.string(),
-  trigger:        z.string(),
-  summary:        z.string(),
-  timestamp:      z.number(),
-  outputSnapshot: z.record(z.string(), z.string()),
-  memory:         memorySchema,
-})
-
-export type CheckpointData = z.infer<typeof checkpointSchema>
-
-// ─── Default structures ───────────────────────────────────────────────────────
+// ─── Default memory structure ─────────────────────────────────────────────────
 
 export function defaultMemory(): ProjectMemory {
   return {
@@ -116,31 +76,12 @@ export function defaultMemory(): ProjectMemory {
   }
 }
 
-// ─── Project initialisation ───────────────────────────────────────────────────
-
-export async function initProject(projectId: string): Promise<void> {
-  if (!(await canWrite())) return
-  try {
-    await fs.mkdir(projectDir(projectId),     { recursive: true })
-    await fs.mkdir(checkpointsDir(projectId), { recursive: true })
-    await fs.mkdir(outputDir(projectId),      { recursive: true })
-    try {
-      await fs.access(memoryPath(projectId))
-    } catch {
-      await fs.writeFile(memoryPath(projectId), JSON.stringify(defaultMemory(), null, 2), 'utf-8')
-    }
-  } catch { /* best-effort */ }
-}
-
-/** Alias kept for call sites that use the old name */
-export const ensureProjectDir = initProject
-
-// ─── memory.json ──────────────────────────────────────────────────────────────
+// ─── memory.json → Redis string ───────────────────────────────────────────────
 
 export async function readMemory(projectId: string): Promise<ProjectMemory> {
   try {
-    const raw = await fs.readFile(memoryPath(projectId), 'utf-8')
-    return memorySchema.parse(JSON.parse(raw)) as ProjectMemory
+    const raw = await getRedis().get<unknown>(KEY.memory(projectId))
+    return parseItem<ProjectMemory>(raw) ?? defaultMemory()
   } catch {
     return defaultMemory()
   }
@@ -148,46 +89,46 @@ export async function readMemory(projectId: string): Promise<ProjectMemory> {
 
 export async function writeMemory(projectId: string, memory: ProjectMemory): Promise<void> {
   try {
-    await initProject(projectId)
-    await fs.writeFile(memoryPath(projectId), JSON.stringify(memory, null, 2), 'utf-8')
+    await getRedis().set(KEY.memory(projectId), JSON.stringify(memory), { ex: TTL_DATA })
   } catch { /* best-effort */ }
 }
 
-// ─── session_log.jsonl (append-only — NEVER overwrite or delete) ──────────────
+// ─── session_log.jsonl → Redis list ──────────────────────────────────────────
 
 export async function appendSessionLog(projectId: string, event: ConversationEvent): Promise<void> {
   try {
-    await initProject(projectId)
-    await fs.appendFile(sessionLogPath(projectId), JSON.stringify(event) + '\n', 'utf-8')
+    const redis = getRedis()
+    await redis.rpush(KEY.sessionLog(projectId), JSON.stringify(event))
+    // Trim the list so it never grows unbounded
+    await redis.ltrim(KEY.sessionLog(projectId), -MAX_LOG_ENTRIES, -1)
+    await redis.expire(KEY.sessionLog(projectId), TTL_LOG)
   } catch { /* best-effort */ }
 }
 
-/**
- * Reads the last `maxTokens` worth of session log entries (default 40k).
- * Returns events in chronological order.
- */
 export async function readRecentSessionLog(
   projectId: string,
   maxTokens = MAX_LOG_TOKENS,
 ): Promise<ConversationEvent[]> {
   try {
-    const raw   = await fs.readFile(sessionLogPath(projectId), 'utf-8')
-    const lines = raw.split('\n').filter(l => l.trim())
+    const redis = getRedis()
+    // Read the tail of the list, then trim to token budget
+    const raw = await redis.lrange(KEY.sessionLog(projectId), -2000, -1)
+    if (!raw || raw.length === 0) return []
 
-    const selected: ConversationEvent[] = []
+    const events: ConversationEvent[] = []
     let charCount = 0
     const maxChars = maxTokens * CHARS_PER_TOKEN
 
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i]!
+    for (let i = raw.length - 1; i >= 0; i--) {
+      const item = raw[i]
+      const line = typeof item === 'string' ? item : JSON.stringify(item)
       charCount += line.length
       if (charCount > maxChars) break
-      try {
-        selected.unshift(JSON.parse(line) as ConversationEvent)
-      } catch { /* skip malformed lines */ }
+      const parsed = parseItem<ConversationEvent>(item)
+      if (parsed) events.unshift(parsed)
     }
 
-    return selected
+    return events
   } catch {
     return []
   }
@@ -195,80 +136,80 @@ export async function readRecentSessionLog(
 
 export async function readFullSessionLog(projectId: string): Promise<ConversationEvent[]> {
   try {
-    const raw = await fs.readFile(sessionLogPath(projectId), 'utf-8')
-    return raw
-      .split('\n')
-      .filter(l => l.trim())
-      .flatMap(l => { try { return [JSON.parse(l) as ConversationEvent] } catch { return [] } })
+    const raw = await getRedis().lrange(KEY.sessionLog(projectId), 0, -1)
+    if (!raw) return []
+    return raw.flatMap(item => {
+      const parsed = parseItem<ConversationEvent>(item)
+      return parsed ? [parsed] : []
+    })
   } catch {
     return []
   }
 }
 
-// ─── spec.json (write ONCE — error if already exists) ────────────────────────
+// ─── spec.json → Redis string (write-once guard preserved) ───────────────────
 
 export async function writeSpec(projectId: string, spec: SpecDocument): Promise<void> {
   try {
-    await initProject(projectId)
-    const p = specPath(projectId)
-    try {
-      await fs.access(p)
-      throw new Error(`spec.json already exists for project ${projectId}. The spec cannot be overwritten.`)
-    } catch (err) {
-      if (err instanceof Error && err.message.includes('already exists')) throw err
-      await fs.writeFile(p, JSON.stringify(spec, null, 2), 'utf-8')
+    const redis = getRedis()
+    const exists = await redis.exists(KEY.spec(projectId))
+    if (exists) {
+      throw new Error(`spec already exists for project ${projectId}. The spec cannot be overwritten.`)
     }
+    await redis.set(KEY.spec(projectId), JSON.stringify(spec), { ex: TTL_DATA })
   } catch (err) {
-    // Re-throw intentional guard; swallow IO errors (read-only fs)
     if (err instanceof Error && err.message.includes('already exists')) throw err
-    // best-effort
+    // Swallow all other errors (best-effort)
   }
 }
 
 export async function readSpec(projectId: string): Promise<SpecDocument | null> {
   try {
-    const raw = await fs.readFile(specPath(projectId), 'utf-8')
-    return JSON.parse(raw) as SpecDocument
+    const raw = await getRedis().get<unknown>(KEY.spec(projectId))
+    return parseItem<SpecDocument>(raw)
   } catch {
     return null
   }
 }
 
 export async function specExists(projectId: string): Promise<boolean> {
-  try { await fs.access(specPath(projectId)); return true } catch { return false }
+  try {
+    return (await getRedis().exists(KEY.spec(projectId))) > 0
+  } catch {
+    return false
+  }
 }
 
-// ─── review_list.json (append-only low-confidence flags) ─────────────────────
+// ─── review_list.json → Redis list ───────────────────────────────────────────
 
 export async function appendReviewList(projectId: string, flag: ReviewFlag): Promise<void> {
   try {
-    await initProject(projectId)
-    const p = reviewListPath(projectId)
-    let list: ReviewFlag[] = []
-    try {
-      const raw = await fs.readFile(p, 'utf-8')
-      list = JSON.parse(raw) as ReviewFlag[]
-    } catch { /* file doesn't exist yet */ }
-    list.push(flag)
-    await fs.writeFile(p, JSON.stringify(list, null, 2), 'utf-8')
+    const redis = getRedis()
+    await redis.rpush(KEY.reviewList(projectId), JSON.stringify(flag))
+    await redis.ltrim(KEY.reviewList(projectId), -MAX_REVIEW_ITEMS, -1)
+    await redis.expire(KEY.reviewList(projectId), TTL_DATA)
   } catch { /* best-effort */ }
 }
 
 export async function readReviewList(projectId: string): Promise<ReviewFlag[]> {
   try {
-    const raw = await fs.readFile(reviewListPath(projectId), 'utf-8')
-    return JSON.parse(raw) as ReviewFlag[]
+    const raw = await getRedis().lrange(KEY.reviewList(projectId), 0, -1)
+    if (!raw) return []
+    return raw.flatMap(item => {
+      const parsed = parseItem<ReviewFlag>(item)
+      return parsed ? [parsed] : []
+    })
   } catch {
     return []
   }
 }
 
-// ─── config.json ──────────────────────────────────────────────────────────────
+// ─── config.json → Redis string ──────────────────────────────────────────────
 
 export async function readProjectConfig(projectId: string): Promise<Record<string, unknown>> {
   try {
-    const raw = await fs.readFile(configPath(projectId), 'utf-8')
-    return JSON.parse(raw) as Record<string, unknown>
+    const raw = await getRedis().get<unknown>(KEY.config(projectId))
+    return parseItem<Record<string, unknown>>(raw) ?? {}
   } catch {
     return {}
   }
@@ -276,75 +217,85 @@ export async function readProjectConfig(projectId: string): Promise<Record<strin
 
 export async function writeProjectConfig(projectId: string, config: Record<string, unknown>): Promise<void> {
   try {
-    await initProject(projectId)
-    await fs.writeFile(configPath(projectId), JSON.stringify(config, null, 2), 'utf-8')
+    await getRedis().set(KEY.config(projectId), JSON.stringify(config), { ex: TTL_DATA })
   } catch { /* best-effort */ }
 }
 
-// ─── Output files (consensus-validated code) ──────────────────────────────────
+// ─── output/ → Redis strings + index set ─────────────────────────────────────
 
 export async function writeOutput(projectId: string, filename: string, content: string): Promise<void> {
   try {
-    await initProject(projectId)
-    const safe = path.basename(filename)
-    await fs.writeFile(path.join(outputDir(projectId), safe), content, 'utf-8')
+    const redis = getRedis()
+    await redis.set(KEY.output(projectId, filename), content, { ex: TTL_DATA })
+    await redis.sadd(KEY.outputIndex(projectId), filename)
+    await redis.expire(KEY.outputIndex(projectId), TTL_DATA)
   } catch { /* best-effort */ }
 }
 
-/** Alias kept for call sites that use the old name */
 export const writeOutputFile = writeOutput
 
 export async function readOutputFile(projectId: string, filename: string): Promise<string> {
-  return fs.readFile(path.join(outputDir(projectId), path.basename(filename)), 'utf-8')
+  const raw = await getRedis().get<unknown>(KEY.output(projectId, filename))
+  if (raw === null || raw === undefined) throw new Error(`Output file not found: ${filename}`)
+  return typeof raw === 'string' ? raw : JSON.stringify(raw)
 }
 
 export async function listOutputFiles(projectId: string): Promise<string[]> {
-  try { return fs.readdir(outputDir(projectId)) } catch { return [] }
+  try {
+    const members = await getRedis().smembers<string[]>(KEY.outputIndex(projectId))
+    return members ?? []
+  } catch {
+    return []
+  }
 }
 
-// ─── Checkpoints ─────────────────────────────────────────────────────────────
+// ─── checkpoints/ → Redis list ───────────────────────────────────────────────
+
+export interface CheckpointData {
+  id:             string
+  trigger:        string
+  summary:        string
+  timestamp:      number
+  outputSnapshot: Record<string, string>
+  memory:         ProjectMemory
+}
 
 export async function saveCheckpoint(
   projectId: string,
-  trigger: 'module_complete' | 'conflict_resolved' | 'human_confirm' | 'manual',
-  summary: string,
+  trigger:   'module_complete' | 'conflict_resolved' | 'human_confirm' | 'manual',
+  summary:   string,
   outputSnapshot: Record<string, string> = {},
 ): Promise<string> {
   const id = `${Date.now()}_${trigger}`
   try {
-    await initProject(projectId)
-    const memory  = await readMemory(projectId)
+    const redis    = getRedis()
+    const memory   = await readMemory(projectId)
     const payload: CheckpointData = { id, trigger, summary, timestamp: Date.now(), outputSnapshot, memory }
-    await fs.writeFile(
-      path.join(checkpointsDir(projectId), `${id}.json`),
-      JSON.stringify(payload, null, 2),
-      'utf-8',
-    )
+    await redis.rpush(KEY.checkpoints(projectId), JSON.stringify(payload))
+    await redis.ltrim(KEY.checkpoints(projectId), -MAX_CHECKPOINTS, -1)
+    await redis.expire(KEY.checkpoints(projectId), TTL_DATA)
   } catch { /* best-effort */ }
   return id
 }
 
-export async function listCheckpoints(projectId: string): Promise<Array<Pick<CheckpointData, 'id' | 'trigger' | 'timestamp' | 'summary'>>> {
+export async function listCheckpoints(
+  projectId: string,
+): Promise<Array<Pick<CheckpointData, 'id' | 'trigger' | 'timestamp' | 'summary'>>> {
   try {
-    const files = await fs.readdir(checkpointsDir(projectId))
-    const results = await Promise.all(
-      files.filter(f => f.endsWith('.json')).map(async f => {
-        try {
-          const raw  = await fs.readFile(path.join(checkpointsDir(projectId), f), 'utf-8')
-          const data = checkpointSchema.parse(JSON.parse(raw))
-          return { id: data.id, trigger: data.trigger, timestamp: data.timestamp, summary: data.summary }
-        } catch { return null }
-      }),
-    )
-    return results
-      .filter((r): r is NonNullable<typeof r> => r !== null)
+    const raw = await getRedis().lrange(KEY.checkpoints(projectId), 0, -1)
+    if (!raw) return []
+    return raw
+      .flatMap(item => {
+        const parsed = parseItem<CheckpointData>(item)
+        return parsed ? [{ id: parsed.id, trigger: parsed.trigger, timestamp: parsed.timestamp, summary: parsed.summary }] : []
+      })
       .sort((a, b) => b.timestamp - a.timestamp)
   } catch {
     return []
   }
 }
 
-// ─── Token estimation (used by memory compression) ────────────────────────────
+// ─── Token estimation (used by budget governor) ───────────────────────────────
 
 export function estimateTokens(text: string): number {
   return Math.ceil(text.length / CHARS_PER_TOKEN)

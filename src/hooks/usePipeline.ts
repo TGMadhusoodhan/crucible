@@ -52,9 +52,19 @@ function connectSSE(
 
 // ─── Main hook ────────────────────────────────────────────────────────────────
 
-// Phases where the pipeline split itself to avoid Vercel timeout — client
-// reconnects immediately without waiting for user input.
-const AUTO_RECONNECT_PHASES = new Set(['phase3_reviewing'])
+// Phases where the client must NOT auto-reconnect: human-input gates and
+// terminal states. Every other phase means the pipeline still has work to do
+// and the client should reconnect immediately for the next invocation.
+const NO_AUTO_RECONNECT = new Set([
+  'idle',
+  'phase2_answering',
+  'phase2_spec_confirm',
+  'conflict_escalated',
+  'paused',
+  'stopped',
+  'complete',
+  'error',
+])
 
 export function usePipeline() {
   const state    = usePipelineState()
@@ -148,9 +158,11 @@ export function usePipeline() {
       }
     }
 
-    // If the pipeline split itself at a non-human gate (e.g. generation→review),
-    // immediately reconnect to continue in a new Vercel function invocation.
-    if (AUTO_RECONNECT_PHASES.has(lastPhaseRef.current)) {
+    // If the stream closed at a pipeline-internal phase (not a human gate or
+    // terminal state), the pipeline still has work to do — reconnect immediately.
+    // This handles the normal split (phase3_reviewing), Vercel timeout mid-self-check
+    // (phase3_self_check), and any other unexpected mid-pipeline disconnect.
+    if (!NO_AUTO_RECONNECT.has(lastPhaseRef.current)) {
       void connectToStream(sessionId)
     }
   }, [dispatch, handleSSEEvent])
@@ -323,6 +335,9 @@ export function usePipeline() {
       dispatch({ type: 'ANSWER_QUESTION', questionId, optionId }),
     setProject: (project: ProjectConfig) =>
       dispatch({ type: 'SET_PROJECT', project }),
-    resetSession: () => dispatch({ type: 'RESET_SESSION' }),
+    resetSession: () => {
+      lastPhaseRef.current = 'idle'
+      dispatch({ type: 'RESET_SESSION' })
+    },
   }
 }
