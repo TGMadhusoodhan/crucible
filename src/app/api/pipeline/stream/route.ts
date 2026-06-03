@@ -4,10 +4,9 @@ import { serializeHeartbeat } from '@/lib/conversation/event-log'
 import { captureApiError } from '@/lib/sentry'
 import type { SSEEvent } from '@/types'
 
-// Vercel Pro supports up to 800s. Set to maximum so long generation runs don't hit
-// the default 300s limit mid-self-check. The generation→review reconnect split (below)
-// further reduces per-invocation time, but maxDuration is the safety net.
-export const maxDuration = 800
+// Hobby plan max is 300s; Pro allows up to 800s.
+// The generation→review reconnect split keeps each invocation well under this.
+export const maxDuration = 300
 
 const HEARTBEAT_MS = 15_000  // keep connection alive while pipeline is running
 
