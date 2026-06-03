@@ -4,8 +4,7 @@ import Link from 'next/link'
 import { useCallback, useEffect, useState } from 'react'
 import { usePipelineDispatch, usePipelineState } from '@/store'
 import { cn } from '@/lib/utils'
-import { pickProjectFolder, readOutputFromFolder, isFileSystemAccessSupported } from '@/lib/localfs'
-import type { Provider } from '@/types'
+import type { ConsensusOutput, Provider, SpecDocument } from '@/types'
 
 const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together'] as const
 
@@ -119,12 +118,13 @@ export function ProjectNavigator() {
         reviewerModelId:  p.reviewerModelId,
       },
     })
-    // Try to restore the last completed session from the user's local folder.
-    // This is async — if no folder is linked or no output exists, fall back to RESET_SESSION.
-    readOutputFromFolder(p.id)
-      .then((saved) => {
-        if (saved?.output) {
-          dispatch({ type: 'RESTORE_SESSION', output: saved.output, spec: saved.spec })
+    // Fetch the last stored output from the server (Redis, 1-year TTL).
+    // Works on any device — no local folder required.
+    fetch(`/api/projects/${p.id}/output`)
+      .then((r) => r.json() as Promise<{ success: boolean; data?: { output: ConsensusOutput; spec: SpecDocument | null } | null }>)
+      .then((data) => {
+        if (data.success && data.data?.output) {
+          dispatch({ type: 'RESTORE_SESSION', output: data.data.output, spec: data.data.spec ?? null })
         } else {
           dispatch({ type: 'RESET_SESSION' })
         }
@@ -231,13 +231,9 @@ function NewProjectModal({ onClose, onCreated }: { onClose: () => void; onCreate
     reviewerProvider: 'anthropic' as Provider,
     reviewerModelId:  defaultModelId('anthropic'),
   })
-  const [saving,       setSaving]      = useState(false)
-  const [error,        setError]       = useState('')
-  const [credMap,      setCredMap]     = useState<Record<string, boolean>>({})
-  // Step 2: link local folder after project is created
-  const [createdProject, setCreatedProject] = useState<Project | null>(null)
-  const [folderPicking,  setFolderPicking]  = useState(false)
-  const [folderName,     setFolderName]     = useState<string | null>(null)
+  const [saving,  setSaving] = useState(false)
+  const [error,   setError]  = useState('')
+  const [credMap, setCredMap] = useState<Record<string, boolean>>({})
 
   // Load which providers have valid keys so we can show ✓/✗
   useEffect(() => {
@@ -272,72 +268,11 @@ function NewProjectModal({ onClose, onCreated }: { onClose: () => void; onCreate
     })
     const data = await res.json() as { success: boolean; data?: Project; error?: string }
     if (data.success && data.data) {
-      setSaving(false)
-      setCreatedProject(data.data)   // advance to step 2 (link folder)
+      onCreated(data.data)
     } else {
       setError(data.error ?? 'Failed to create project')
       setSaving(false)
     }
-  }
-
-  // ─── Step 2: link local folder ────────────────────────────────────────────────
-  if (createdProject) {
-    async function handlePickFolder() {
-      setFolderPicking(true)
-      try {
-        const handle = await pickProjectFolder(createdProject!.id)
-        if (handle) setFolderName(handle.name)
-      } finally {
-        setFolderPicking(false)
-      }
-    }
-
-    return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
-        <div className="w-full max-w-sm rounded-xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl space-y-4">
-          <div>
-            <h2 className="text-sm font-semibold text-zinc-100">Link a local folder</h2>
-            <p className="mt-1 text-xs text-zinc-500">
-              Pick a folder on your computer. When the pipeline finishes, the generated code
-              will be saved there automatically — and restored the next time you open this project.
-            </p>
-          </div>
-
-          {folderName ? (
-            <div className="rounded border border-emerald-800 bg-emerald-950/40 px-3 py-2">
-              <p className="text-xs text-emerald-400">✓ Linked: <span className="font-mono">{folderName}</span></p>
-            </div>
-          ) : isFileSystemAccessSupported() ? (
-            <button
-              onClick={handlePickFolder}
-              disabled={folderPicking}
-              className="w-full rounded border border-zinc-700 py-2.5 text-sm text-zinc-200 hover:bg-zinc-800 disabled:opacity-40 transition-colors"
-            >
-              {folderPicking ? 'Opening picker…' : '📁 Pick folder'}
-            </button>
-          ) : (
-            <p className="text-xs text-zinc-500 rounded border border-zinc-800 px-3 py-2.5">
-              Local folder save requires Chrome or Edge. You can still copy code from the output panel.
-            </p>
-          )}
-
-          <div className="flex gap-2 pt-1">
-            <button
-              onClick={() => onCreated(createdProject!)}
-              className="flex-1 rounded border border-zinc-700 py-2 text-sm text-zinc-400 hover:bg-zinc-800 transition-colors"
-            >
-              Skip for now
-            </button>
-            <button
-              onClick={() => onCreated(createdProject!)}
-              className="flex-1 rounded bg-zinc-100 py-2 text-sm font-semibold text-zinc-900 hover:bg-white transition-colors"
-            >
-              {folderName ? 'Done' : 'Skip'}
-            </button>
-          </div>
-        </div>
-      </div>
-    )
   }
 
   return (

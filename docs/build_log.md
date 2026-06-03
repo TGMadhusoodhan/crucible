@@ -451,3 +451,28 @@ tsconfig.json: added test-logic.mts to exclude list
 
 ### Left Off At
 - TypeScript: zero errors. Feature complete.
+
+---
+
+## Session 2026-06-03
+
+### Completed
+- Fixed ENOENT crash on Vercel: server filesystem writes are now best-effort (silently swallowed on read-only deployments). Pipeline state lives in Redis; filesystem is supplementary only.
+- Removed step-2 "Link local folder" modal from project creation (was blocking on mobile/Firefox/Windows/Mac).
+- Implemented cross-device output persistence: ConsensusOutput + spec stored in Redis under `project_output:{userId}:{projectId}` (1-year TTL). Any device can now restore a previously generated session.
+
+### Files Modified
+- src/lib/memory/filesystem.ts — added `canWrite()` probe; all write operations (initProject, writeMemory, appendSessionLog, writeSpec, appendReviewList, writeProjectConfig, writeOutput, saveCheckpoint) wrapped in try-catch, silently fail on read-only fs
+- src/lib/pipeline/orchestrator.ts — added `StoredProjectOutput` interface, `saveProjectOutput()`, `getProjectOutput()` (Redis, 1-year TTL); call `saveProjectOutput` fire-and-forget when `decision.promote` is true; added `ConsensusOutput, SpecDocument` to top-level type imports
+- src/components/shared/ProjectNavigator.tsx — `selectProject()` now fetches `/api/projects/:id/output` (server Redis) instead of local folder; removed step-2 link-folder modal from `NewProjectModal`; cleaned up imports
+
+### Files Created
+- src/app/api/projects/[id]/output/route.ts — GET /api/projects/:id/output — returns StoredProjectOutput from Redis for the authenticated user
+
+### Decisions Made
+- Output persistence is server-first (Redis) not client-first (IndexedDB). Local folder save in CompletePanel stays as an optional "save to disk" feature for Chrome/Edge desktop users.
+- `saveProjectOutput` is fire-and-forget from orchestrator — never blocks consensus promotion.
+- 1-year TTL matches project data TTL.
+
+### Left Off At
+- TypeScript: zero errors. All pipeline runs now work cross-platform (Vercel, mobile, Windows, Mac, any browser).

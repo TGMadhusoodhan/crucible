@@ -10,6 +10,26 @@ const CRUCIBLE_DIR    = path.join(os.homedir(), '.crucible', 'projects')
 const CHARS_PER_TOKEN = 4
 const MAX_LOG_TOKENS  = 40_000
 
+// ─── Filesystem availability ──────────────────────────────────────────────────
+// Vercel and other serverless runtimes have a read-only filesystem outside /tmp.
+// We test write access once and cache the result so the pipeline never crashes
+// on a filesystem error — writes are best-effort informational logging only.
+// The pipeline state lives in Redis; filesystem is supplementary.
+
+let _canWrite: boolean | null = null
+
+async function canWrite(): Promise<boolean> {
+  if (_canWrite !== null) return _canWrite
+  try {
+    await fs.mkdir(CRUCIBLE_DIR, { recursive: true })
+    _canWrite = true
+  } catch {
+    _canWrite = false
+    console.warn('[crucible/filesystem] Server filesystem is read-only — session logs and checkpoints disabled. Pipeline runs normally.')
+  }
+  return _canWrite
+}
+
 // ─── Path helpers ─────────────────────────────────────────────────────────────
 
 export function projectDir(id: string)     { return path.join(CRUCIBLE_DIR, id) }
@@ -99,16 +119,17 @@ export function defaultMemory(): ProjectMemory {
 // ─── Project initialisation ───────────────────────────────────────────────────
 
 export async function initProject(projectId: string): Promise<void> {
-  await fs.mkdir(projectDir(projectId),     { recursive: true })
-  await fs.mkdir(checkpointsDir(projectId), { recursive: true })
-  await fs.mkdir(outputDir(projectId),      { recursive: true })
-
-  // Write default memory.json if it doesn't exist
+  if (!(await canWrite())) return
   try {
-    await fs.access(memoryPath(projectId))
-  } catch {
-    await fs.writeFile(memoryPath(projectId), JSON.stringify(defaultMemory(), null, 2), 'utf-8')
-  }
+    await fs.mkdir(projectDir(projectId),     { recursive: true })
+    await fs.mkdir(checkpointsDir(projectId), { recursive: true })
+    await fs.mkdir(outputDir(projectId),      { recursive: true })
+    try {
+      await fs.access(memoryPath(projectId))
+    } catch {
+      await fs.writeFile(memoryPath(projectId), JSON.stringify(defaultMemory(), null, 2), 'utf-8')
+    }
+  } catch { /* best-effort */ }
 }
 
 /** Alias kept for call sites that use the old name */
@@ -126,15 +147,19 @@ export async function readMemory(projectId: string): Promise<ProjectMemory> {
 }
 
 export async function writeMemory(projectId: string, memory: ProjectMemory): Promise<void> {
-  await initProject(projectId)
-  await fs.writeFile(memoryPath(projectId), JSON.stringify(memory, null, 2), 'utf-8')
+  try {
+    await initProject(projectId)
+    await fs.writeFile(memoryPath(projectId), JSON.stringify(memory, null, 2), 'utf-8')
+  } catch { /* best-effort */ }
 }
 
 // ─── session_log.jsonl (append-only — NEVER overwrite or delete) ──────────────
 
 export async function appendSessionLog(projectId: string, event: ConversationEvent): Promise<void> {
-  await initProject(projectId)
-  await fs.appendFile(sessionLogPath(projectId), JSON.stringify(event) + '\n', 'utf-8')
+  try {
+    await initProject(projectId)
+    await fs.appendFile(sessionLogPath(projectId), JSON.stringify(event) + '\n', 'utf-8')
+  } catch { /* best-effort */ }
 }
 
 /**
@@ -183,16 +208,20 @@ export async function readFullSessionLog(projectId: string): Promise<Conversatio
 // ─── spec.json (write ONCE — error if already exists) ────────────────────────
 
 export async function writeSpec(projectId: string, spec: SpecDocument): Promise<void> {
-  await initProject(projectId)
-  const p = specPath(projectId)
   try {
-    await fs.access(p)
-    // File exists — this is an error. Spec is immutable once written.
-    throw new Error(`spec.json already exists for project ${projectId}. The spec cannot be overwritten.`)
+    await initProject(projectId)
+    const p = specPath(projectId)
+    try {
+      await fs.access(p)
+      throw new Error(`spec.json already exists for project ${projectId}. The spec cannot be overwritten.`)
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('already exists')) throw err
+      await fs.writeFile(p, JSON.stringify(spec, null, 2), 'utf-8')
+    }
   } catch (err) {
+    // Re-throw intentional guard; swallow IO errors (read-only fs)
     if (err instanceof Error && err.message.includes('already exists')) throw err
-    // File does not exist — safe to write
-    await fs.writeFile(p, JSON.stringify(spec, null, 2), 'utf-8')
+    // best-effort
   }
 }
 
@@ -212,15 +241,17 @@ export async function specExists(projectId: string): Promise<boolean> {
 // ─── review_list.json (append-only low-confidence flags) ─────────────────────
 
 export async function appendReviewList(projectId: string, flag: ReviewFlag): Promise<void> {
-  await initProject(projectId)
-  const p = reviewListPath(projectId)
-  let list: ReviewFlag[] = []
   try {
-    const raw = await fs.readFile(p, 'utf-8')
-    list = JSON.parse(raw) as ReviewFlag[]
-  } catch { /* file doesn't exist yet */ }
-  list.push(flag)
-  await fs.writeFile(p, JSON.stringify(list, null, 2), 'utf-8')
+    await initProject(projectId)
+    const p = reviewListPath(projectId)
+    let list: ReviewFlag[] = []
+    try {
+      const raw = await fs.readFile(p, 'utf-8')
+      list = JSON.parse(raw) as ReviewFlag[]
+    } catch { /* file doesn't exist yet */ }
+    list.push(flag)
+    await fs.writeFile(p, JSON.stringify(list, null, 2), 'utf-8')
+  } catch { /* best-effort */ }
 }
 
 export async function readReviewList(projectId: string): Promise<ReviewFlag[]> {
@@ -244,16 +275,20 @@ export async function readProjectConfig(projectId: string): Promise<Record<strin
 }
 
 export async function writeProjectConfig(projectId: string, config: Record<string, unknown>): Promise<void> {
-  await initProject(projectId)
-  await fs.writeFile(configPath(projectId), JSON.stringify(config, null, 2), 'utf-8')
+  try {
+    await initProject(projectId)
+    await fs.writeFile(configPath(projectId), JSON.stringify(config, null, 2), 'utf-8')
+  } catch { /* best-effort */ }
 }
 
 // ─── Output files (consensus-validated code) ──────────────────────────────────
 
 export async function writeOutput(projectId: string, filename: string, content: string): Promise<void> {
-  await initProject(projectId)
-  const safe = path.basename(filename)
-  await fs.writeFile(path.join(outputDir(projectId), safe), content, 'utf-8')
+  try {
+    await initProject(projectId)
+    const safe = path.basename(filename)
+    await fs.writeFile(path.join(outputDir(projectId), safe), content, 'utf-8')
+  } catch { /* best-effort */ }
 }
 
 /** Alias kept for call sites that use the old name */
@@ -275,15 +310,17 @@ export async function saveCheckpoint(
   summary: string,
   outputSnapshot: Record<string, string> = {},
 ): Promise<string> {
-  await initProject(projectId)
-  const id      = `${Date.now()}_${trigger}`
-  const memory  = await readMemory(projectId)
-  const payload: CheckpointData = { id, trigger, summary, timestamp: Date.now(), outputSnapshot, memory }
-  await fs.writeFile(
-    path.join(checkpointsDir(projectId), `${id}.json`),
-    JSON.stringify(payload, null, 2),
-    'utf-8',
-  )
+  const id = `${Date.now()}_${trigger}`
+  try {
+    await initProject(projectId)
+    const memory  = await readMemory(projectId)
+    const payload: CheckpointData = { id, trigger, summary, timestamp: Date.now(), outputSnapshot, memory }
+    await fs.writeFile(
+      path.join(checkpointsDir(projectId), `${id}.json`),
+      JSON.stringify(payload, null, 2),
+      'utf-8',
+    )
+  } catch { /* best-effort */ }
   return id
 }
 

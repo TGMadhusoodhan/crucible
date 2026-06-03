@@ -17,11 +17,13 @@ import { runPhase3Consensus, promoteAfterHumanResolution } from './phase3-consen
 import { consumePendingOverrides } from './human-override'
 import type {
   BudgetMode,
+  ConsensusOutput,
   ContextInput,
   PipelineConfig,
   PipelinePhase,
   PipelineSessionState,
   ReviewPayload,
+  SpecDocument,
   SSEEvent,
 } from '@/types'
 
@@ -30,8 +32,10 @@ import type {
 const STATE_KEY   = (sid: string) => `pipeline:${sid}:state`
 const EVENTS_KEY  = (sid: string) => `pipeline:${sid}:events`
 const CONTROL_KEY = (sid: string) => `pipeline:${sid}:control`
+const OUTPUT_KEY  = (uid: string, pid: string) => `project_output:${uid}:${pid}`
 
-const SESSION_TTL = 60 * 60 * 24  // 24 hours
+const SESSION_TTL = 60 * 60 * 24         // 24 hours
+const OUTPUT_TTL  = 60 * 60 * 24 * 365   // 1 year — survives across devices
 
 function getRedis(): Redis {
   return new Redis({
@@ -84,6 +88,43 @@ export async function consumeEvents(sessionId: string, count = 50): Promise<SSEE
       return []
     }
   })
+}
+
+// ─── Project-level output (long-lived, cross-device) ─────────────────────────
+// Consensus output is stored here (1 year TTL) so any device can restore it.
+// This is separate from the session state (24h TTL).
+
+export interface StoredProjectOutput {
+  output:    ConsensusOutput
+  spec:      SpecDocument | null
+  savedAt:   number
+  sessionId: string
+}
+
+export async function saveProjectOutput(
+  userId:    string,
+  projectId: string,
+  output:    ConsensusOutput,
+  spec:      SpecDocument | null,
+  sessionId: string,
+): Promise<void> {
+  const redis = getRedis()
+  const stored: StoredProjectOutput = { output, spec, savedAt: Date.now(), sessionId }
+  await redis.set(OUTPUT_KEY(userId, projectId), JSON.stringify(stored), { ex: OUTPUT_TTL })
+}
+
+export async function getProjectOutput(
+  userId:    string,
+  projectId: string,
+): Promise<StoredProjectOutput | null> {
+  const redis = getRedis()
+  const raw   = await redis.get<string>(OUTPUT_KEY(userId, projectId))
+  if (!raw) return null
+  try {
+    return typeof raw === 'string' ? JSON.parse(raw) as StoredProjectOutput : raw as StoredProjectOutput
+  } catch {
+    return null
+  }
 }
 
 // ─── Control signals — pause / stop ──────────────────────────────────────────
@@ -591,6 +632,10 @@ export async function runPipeline(
 
     if (decision.promote) {
       state.output = decision.output
+      // Persist to long-lived Redis key so any device can restore this session.
+      // Fire-and-forget — never block the pipeline on this.
+      saveProjectOutput(state.userId, state.projectId, decision.output!, state.spec ?? null, state.sessionId)
+        .catch(err => console.error('[orchestrator] saveProjectOutput failed:', err))
       state = await transition(state, 'complete')
       return
     }
