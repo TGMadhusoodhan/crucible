@@ -1,25 +1,12 @@
-import { auth } from '@clerk/nextjs/server'
 import { getSessionState, runPipeline } from '@/lib/pipeline/orchestrator'
 import { serializeHeartbeat } from '@/lib/conversation/event-log'
 import { captureApiError } from '@/lib/sentry'
 import type { SSEEvent } from '@/types'
 
-// Hobby plan max is 300s; Pro allows up to 800s.
-// The generation→review reconnect split keeps each invocation well under this.
-export const maxDuration = 300
+const HEARTBEAT_MS = 15_000
 
-const HEARTBEAT_MS = 15_000  // keep connection alive while pipeline is running
-
-// GET /api/pipeline/stream?sessionId=xxx
-// SSE stream: runs the pipeline and emits events directly to the client.
-// The pipeline is re-entrant — it resumes from wherever the session state left off.
-// Returns when the pipeline reaches a human-input gate, completes, or errors.
-// The client reconnects after submitting answers / confirming spec / resolving conflict.
 export async function GET(request: Request): Promise<Response> {
-  const { userId: clerkUserId } = await auth()
-  if (!clerkUserId) {
-    return new Response('Unauthorized', { status: 401 })
-  }
+  const userId = 'local'
 
   const { searchParams } = new URL(request.url)
   const sessionId = searchParams.get('sessionId')
@@ -27,21 +14,16 @@ export async function GET(request: Request): Promise<Response> {
     return new Response('Missing sessionId', { status: 400 })
   }
 
-  // Verify session belongs to this user
   const state = await getSessionState(sessionId)
   if (!state) {
     return new Response('Session not found', { status: 404 })
   }
-  if (state.userId !== clerkUserId) {
-    return new Response('Forbidden', { status: 403 })
-  }
 
-  // Human-input gates: client waits for user action before reconnecting.
-  // Pipeline-split phases: client reconnects immediately, no user action needed.
   const GATE_PHASES = new Set([
     'phase2_answering', 'phase2_spec_confirm', 'conflict_escalated',
     'paused', 'stopped', 'complete', 'error',
-    'phase3_reviewing',  // split point: generation done, reconnect for review
+    // phase3_reviewing is a split point: generation done, reconnect for review + edit + verify + dialogue
+    'phase3_reviewing',
   ])
 
   const encoder = new TextEncoder()
@@ -56,7 +38,6 @@ export async function GET(request: Request): Promise<Response> {
         try { controller.close() } catch { /* already closed */ }
       }
 
-      // Abort when client disconnects
       request.signal.addEventListener('abort', close)
 
       const send = (event: SSEEvent): void => {
@@ -77,15 +58,9 @@ export async function GET(request: Request): Promise<Response> {
         }
       }
 
-      // If the session is at a gate, tell the client and close immediately.
-      // This handles the case where the client reconnects after submitting input
-      // but the state was already advanced by the message route.
       const currentState = await getSessionState(sessionId)
       if (!currentState) { close(); return }
 
-      // Human gates: report current phase and wait for user action.
-      // phase3_reviewing: do NOT close here — run the pipeline for the review step.
-      // paused: do NOT close here — run the pipeline to resume.
       const isHumanGate = GATE_PHASES.has(currentState.phase)
         && currentState.phase !== 'paused'
         && currentState.phase !== 'phase3_reviewing'
@@ -95,28 +70,23 @@ export async function GET(request: Request): Promise<Response> {
         return
       }
 
-      // Start heartbeat — keeps the SSE connection alive during long model calls
       const heartbeatTimer = setInterval(() => {
         sendRaw(serializeHeartbeat())
       }, HEARTBEAT_MS)
 
       try {
-        // Run pipeline — it will emit events via our send function (zero-latency, no polling)
         await runPipeline(sessionId, send)
 
-        // Pipeline returned — check why
         const finalState = await getSessionState(sessionId)
         if (finalState && !GATE_PHASES.has(finalState.phase)) {
           send({ type: 'error', message: 'Pipeline exited unexpectedly', phase: finalState.phase })
         } else if (finalState && finalState.phase !== 'error') {
-          // Reached a gate or split point. Send the phase so the client knows
-          // whether to wait for user input or reconnect automatically.
           send({ type: 'phase_change', phase: finalState.phase })
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Pipeline error'
         console.error('[stream] pipeline error:', message)
-        captureApiError(err, `GET /api/pipeline/stream [phase: ${currentState.phase}]`, currentState.userId)
+        captureApiError(err, `GET /api/pipeline/stream [phase: ${currentState.phase}]`, userId)
         send({ type: 'error', message, phase: currentState.phase })
       } finally {
         clearInterval(heartbeatTimer)
@@ -124,9 +94,7 @@ export async function GET(request: Request): Promise<Response> {
       }
     },
 
-    cancel() {
-      // Client disconnected cleanly — nothing to do; the abort listener handles it
-    },
+    cancel() {},
   })
 
   return new Response(stream, {
@@ -134,7 +102,7 @@ export async function GET(request: Request): Promise<Response> {
       'Content-Type':  'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
       'Connection':    'keep-alive',
-      'X-Accel-Buffering': 'no',  // Disable nginx buffering for proxied deployments
+      'X-Accel-Buffering': 'no',
     },
   })
 }

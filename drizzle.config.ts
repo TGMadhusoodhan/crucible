@@ -1,13 +1,13 @@
 import { defineConfig } from 'drizzle-kit'
-import { config } from 'dotenv-flow'
+import path from 'path'
 
-config()
+const dataDir = process.env.DATA_DIR ?? './data'
 
 export default defineConfig({
-  dialect: 'postgresql',
+  dialect: 'sqlite',
   schema: './src/lib/db/schema.ts',
   out: './drizzle',
   dbCredentials: {
-    url: process.env.DATABASE_URL!,
+    url: path.join(dataDir, 'crucible.db'),
   },
 })

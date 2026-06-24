@@ -1,7 +1,10 @@
 import type {
   AlignmentMessage,
+  CoderVerification,
+  DialogueSummary,
   PipelineContext,
   Provider,
+  ReviewEdit,
   ReviewPayload,
   SelfCheckOutput,
   SpecDocument,
@@ -9,19 +12,30 @@ import type {
 } from '@/types'
 import {
   ALIGNMENT_SYSTEM_PROMPT,
+  CODER_DIALOGUE_SYSTEM_PROMPT,
+  CODER_VERIFY_SYSTEM_PROMPT,
   GENERATION_SYSTEM_PROMPT,
+  REVIEWER_DIALOGUE_SYSTEM_PROMPT,
+  REVIEWER_EDIT_SYSTEM_PROMPT,
   REVIEWER_SYSTEM_PROMPT,
   SELF_CHECK_SYSTEM_PROMPT,
   THINKING_SYSTEM_PROMPT,
   BaseAdapter,
   buildAlignmentPrompt,
+  buildCoderDialoguePrompt,
+  buildCoderVerifyPrompt,
   buildReviewPrompt,
+  buildReviewerDialoguePrompt,
+  buildReviewerEditPrompt,
   buildSelfCheckPrompt,
   buildThinkingConversionPrompt,
   buildThinkingPrompt,
   isUnparseableThinkingOutput,
+  parseCoderVerification,
   parseJSON,
+  parseReviewEdit,
   parseReviewPayload,
+  parseReviewerDialogueResponse,
   parseSelfCheckOutput,
   parseThinkingOutput,
 } from './base'
@@ -206,6 +220,54 @@ export class GoogleAdapter extends BaseAdapter {
       return parseReviewPayload(text, round)
     } catch (err) {
       throw this.wrapErr(err, 'review')
+    }
+  }
+
+  // ─── Phase 3b: Reviewer Edit ────────────────────────────────────────────────
+
+  async reviewerEdit(code: string, spec: SpecDocument, review: ReviewPayload, round: number): Promise<ReviewEdit> {
+    try {
+      const prompt = buildReviewerEditPrompt(code, spec, review)
+      const { text } = await this.geminiGenerate(REVIEWER_EDIT_SYSTEM_PROMPT, prompt, 8192)
+      return parseReviewEdit(text)
+    } catch (err) {
+      throw this.wrapErr(err, `reviewerEdit:round${round}`)
+    }
+  }
+
+  // ─── Phase 3b: Coder Verify ─────────────────────────────────────────────────
+
+  async coderVerify(originalCode: string, edit: ReviewEdit, mergedCode: string, review: ReviewPayload): Promise<CoderVerification> {
+    try {
+      const prompt = buildCoderVerifyPrompt(originalCode, edit, mergedCode, review)
+      const { text } = await this.geminiGenerate(CODER_VERIFY_SYSTEM_PROMPT, prompt, 4096)
+      return parseCoderVerification(text)
+    } catch (err) {
+      throw this.wrapErr(err, 'coderVerify')
+    }
+  }
+
+  // ─── Phase 3b: Coder Dialogue ───────────────────────────────────────────────
+
+  async coderDialogue(code: string, dialogue: DialogueSummary, verification: CoderVerification): Promise<string> {
+    try {
+      const prompt = buildCoderDialoguePrompt(code, dialogue, verification)
+      const { text } = await this.geminiGenerate(CODER_DIALOGUE_SYSTEM_PROMPT, prompt, 512)
+      return text.trim()
+    } catch (err) {
+      throw this.wrapErr(err, 'coderDialogue')
+    }
+  }
+
+  // ─── Phase 3b: Reviewer Dialogue ────────────────────────────────────────────
+
+  async reviewerDialogue(code: string, dialogue: DialogueSummary, review: ReviewPayload): Promise<{ response: string; resolved: boolean }> {
+    try {
+      const prompt = buildReviewerDialoguePrompt(code, dialogue, review)
+      const { text } = await this.geminiGenerate(REVIEWER_DIALOGUE_SYSTEM_PROMPT, prompt, 512)
+      return parseReviewerDialogueResponse(text)
+    } catch (err) {
+      throw this.wrapErr(err, 'reviewerDialogue')
     }
   }
 }

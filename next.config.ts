@@ -2,30 +2,26 @@ import type { NextConfig } from 'next'
 import { withSentryConfig } from '@sentry/nextjs'
 
 const nextConfig: NextConfig = {
-  // instrumentation.ts is automatically picked up in Next.js 15+
+  // Required for Docker: produces .next/standalone with self-contained server
+  output: 'standalone',
+
+  // Tell Next.js not to bundle better-sqlite3 (native module — cannot be bundled)
+  serverExternalPackages: ['better-sqlite3'],
 }
 
 export default withSentryConfig(nextConfig, {
-  // Sentry organisation / project (from SENTRY_ORG / SENTRY_PROJECT env, or inferred from auth token)
   org:     process.env.SENTRY_ORG,
   project: process.env.SENTRY_PROJECT,
-
-  // Auth token for source map uploads — set in CI/CD, not required locally
   authToken: process.env.SENTRY_AUTH_TOKEN,
-
-  // Suppress the Sentry CLI output during builds
   silent: true,
 
-  // Upload source maps in production only
+  // Only upload source maps when SENTRY_AUTH_TOKEN is explicitly provided.
+  // During Docker builds, no auth token = no upload (but runtime reporting still works).
   sourcemaps: {
-    disable: process.env.NODE_ENV !== 'production',
+    disable: !process.env.SENTRY_AUTH_TOKEN,
   },
 
-  // Disable the Sentry telemetry about the build plugin itself
   telemetry: false,
-
-  // Don't add automatic performance instrumentation to every route —
-  // we instrument the pipeline phases explicitly via captureException.
   autoInstrumentServerFunctions: false,
   autoInstrumentMiddleware: false,
 })

@@ -1,5 +1,4 @@
-import { auth } from '@clerk/nextjs/server'
-import { eq, and } from 'drizzle-orm'
+import { eq } from 'drizzle-orm'
 import { NextResponse, type NextRequest } from 'next/server'
 import { z } from 'zod'
 import { db, schema } from '@/lib/db'
@@ -11,7 +10,7 @@ import type { ApiResponse, Provider } from '@/types'
 const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together'] as const
 
 const startSchema = z.object({
-  projectId:        z.string().uuid(),
+  projectId:        z.string().min(1),
   taskDescription:  z.string().min(1).max(10_000),
   primaryProvider:  z.enum(PROVIDERS),
   primaryModelId:   z.string().min(1).max(200),
@@ -21,40 +20,19 @@ const startSchema = z.object({
   contextFiles:     z.array(z.string().max(500)).max(50).optional(),
 })
 
-// Fetch + decrypt an API key from DB for a given provider.
-// Returns null if the user has not connected this provider.
-async function getApiKey(dbUserId: string, provider: Provider): Promise<string | null> {
-  const rows = await db
+async function getApiKey(provider: Provider): Promise<string | null> {
+  const [row] = await db
     .select({ encryptedKey: schema.apiCredentials.encryptedKey, isValid: schema.apiCredentials.isValid })
     .from(schema.apiCredentials)
-    .where(
-      and(
-        eq(schema.apiCredentials.userId, dbUserId),
-        eq(schema.apiCredentials.provider, provider),
-      ),
-    )
+    .where(eq(schema.apiCredentials.provider, provider))
     .limit(1)
-
-  const row = rows[0]
   if (!row || !row.isValid) return null
-
-  try {
-    return decrypt(row.encryptedKey)
-  } catch {
-    // Decryption failure — key is corrupted or ENCRYPTION_KEY changed
-    return null
-  }
+  try { return decrypt(row.encryptedKey) } catch { return null }
 }
 
-// POST /api/pipeline/start
-// Creates a new pipeline session and returns sessionId.
-// The client then connects to GET /api/pipeline/stream to run the pipeline.
 export async function POST(request: NextRequest): Promise<NextResponse<ApiResponse>> {
   try {
-    const { userId: clerkUserId } = await auth()
-    if (!clerkUserId) {
-      return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
-    }
+    const userId = 'local'
 
     const body = await request.json() as unknown
     const parsed = startSchema.safeParse(body)
@@ -72,8 +50,6 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       contextText, contextFiles,
     } = parsed.data
 
-    // Crucible's core value: cross-model validation from different training families.
-    // Same provider = same training data = same blind spots = no genuine cross-check.
     if (primaryProvider === reviewerProvider) {
       return NextResponse.json(
         {
@@ -84,23 +60,9 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       )
     }
 
-    // Get DB user record
-    const userRows = await db
-      .select({ id: schema.users.id })
-      .from(schema.users)
-      .where(eq(schema.users.clerkUserId, clerkUserId))
-      .limit(1)
-
-    if (!userRows[0]) {
-      return NextResponse.json({ success: false, error: 'User not found — add an API key first' }, { status: 404 })
-    }
-
-    const dbUserId = userRows[0].id
-
-    // Fetch and decrypt API keys
     const [primaryApiKey, reviewerApiKey] = await Promise.all([
-      getApiKey(dbUserId, primaryProvider),
-      getApiKey(dbUserId, reviewerProvider),
+      getApiKey(primaryProvider),
+      getApiKey(reviewerProvider),
     ])
 
     if (!primaryApiKey) {
@@ -118,7 +80,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     }
 
     const sessionId = await createSession({
-      userId:          clerkUserId,
+      userId,
       projectId,
       taskDescription,
       config: {

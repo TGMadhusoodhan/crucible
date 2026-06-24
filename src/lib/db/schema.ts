@@ -1,38 +1,63 @@
-import { sql } from 'drizzle-orm'
-import { boolean, check, pgTable, text, timestamp, unique, uuid } from 'drizzle-orm/pg-core'
+import { integer, primaryKey, real, sqliteTable, text } from 'drizzle-orm/sqlite-core'
 
-export const users = pgTable(
-  'users',
+// ─── Projects ─────────────────────────────────────────────────────────────────
+// Moved from Redis — was project:{userId}:{id} + projects:{userId} set
+
+export const projects = sqliteTable('projects', {
+  id:               text('id').primaryKey(),
+  name:             text('name').notNull(),
+  description:      text('description').notNull().default(''),
+  primaryProvider:  text('primary_provider').notNull(),
+  primaryModelId:   text('primary_model_id').notNull(),
+  reviewerProvider: text('reviewer_provider').notNull(),
+  reviewerModelId:  text('reviewer_model_id').notNull(),
+  createdAt:        integer('created_at').notNull(),  // unix ms
+})
+
+// ─── API Credentials ──────────────────────────────────────────────────────────
+// Was in Neon with foreign key to users. Now single-user, no FK needed.
+
+export const apiCredentials = sqliteTable('api_credentials', {
+  id:           text('id').primaryKey(),
+  provider:     text('provider').notNull().unique(),
+  encryptedKey: text('encrypted_key').notNull(),
+  isValid:      integer('is_valid', { mode: 'boolean' }).notNull().default(false),
+  createdAt:    integer('created_at').notNull(),
+})
+
+// ─── Budget — per-provider monthly spend ──────────────────────────────────────
+// Moved from Redis incrbyfloat keys
+
+export const budgetSpend = sqliteTable(
+  'budget_spend',
   {
-    id: uuid('id').primaryKey().defaultRandom(),
-    email: text('email').notNull().unique(),
-    plan: text('plan').notNull().default('free'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    clerkUserId: text('clerk_user_id').notNull().unique(),
+    provider:  text('provider').notNull(),
+    yearMonth: text('year_month').notNull(),
+    spendUsd:  real('spend_usd').notNull().default(0),
   },
-  (table) => [
-    check('plan_check', sql`${table.plan} IN ('free', 'indie', 'pro', 'team')`),
-  ],
+  (t) => ({
+    pk: primaryKey({ columns: [t.provider, t.yearMonth] }),
+  }),
 )
 
-export const apiCredentials = pgTable(
-  'api_credentials',
-  {
-    id: uuid('id').primaryKey().defaultRandom(),
-    userId: uuid('user_id')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
-    provider: text('provider').notNull(),
-    encryptedKey: text('encrypted_key').notNull(),
-    isValid: boolean('is_valid').notNull().default(false),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [
-    unique('api_credentials_user_provider_unique').on(table.userId, table.provider),
-  ],
-)
+// ─── Budget — per-provider caps ───────────────────────────────────────────────
 
-export type User = typeof users.$inferSelect
-export type NewUser = typeof users.$inferInsert
-export type ApiCredential = typeof apiCredentials.$inferSelect
+export const providerCaps = sqliteTable('provider_caps', {
+  provider: text('provider').primaryKey(),
+  capUsd:   real('cap_usd').notNull(),
+})
+
+// ─── Budget — per-session cost tracking ───────────────────────────────────────
+
+export const sessionCosts = sqliteTable('session_costs', {
+  sessionId: text('session_id').primaryKey(),
+  costUsd:   real('cost_usd').notNull().default(0),
+  tokens:    integer('tokens').notNull().default(0),
+})
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+export type Project        = typeof projects.$inferSelect
+export type NewProject     = typeof projects.$inferInsert
+export type ApiCredential  = typeof apiCredentials.$inferSelect
 export type NewApiCredential = typeof apiCredentials.$inferInsert

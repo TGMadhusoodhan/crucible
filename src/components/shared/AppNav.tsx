@@ -1,6 +1,5 @@
 'use client'
 
-import { UserButton } from '@clerk/nextjs'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { usePipelineState } from '@/store'
@@ -45,7 +44,7 @@ export function AppNav() {
         <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500 font-mono">beta</span>
       </Link>
 
-      {/* Active project indicator — centre of the bar */}
+      {/* Active project indicator */}
       <div className="flex flex-1 items-center justify-center">
         {projectName ? (
           <div className="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1">
@@ -72,7 +71,7 @@ export function AppNav() {
             API Keys
           </span>
         </NavLink>
-        <UserButton />
+        <span className="text-[10px] text-zinc-600 px-2 font-mono">local</span>
       </nav>
     </header>
   )

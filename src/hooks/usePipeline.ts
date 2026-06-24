@@ -66,6 +66,11 @@ const NO_AUTO_RECONNECT = new Set([
   'error',
 ])
 
+// Phases that are internal pipeline phases (not human gates).
+// When stream closes at these, client reconnects automatically.
+// phase3_reviewing, phase3_reviewer_edit, phase3_coder_verify, phase3_dialogue
+// are all pipeline-internal phases handled within one stream session or auto-reconnected.
+
 export function usePipeline() {
   const state    = usePipelineState()
   const dispatch = usePipelineDispatch()
@@ -123,7 +128,6 @@ export function usePipeline() {
         dispatch({ type: 'CONSENSUS', output: event.output })
         break
       case 'conflict': {
-        // Build a readable escalation reason from the review flags
         const review = event.review
         const highMed = review.flags
           .filter(f => f.severity !== 'LOW')
@@ -137,6 +141,21 @@ export function usePipeline() {
         })
         break
       }
+      case 'reviewer_edit_done':
+        dispatch({ type: 'REVIEWER_EDIT_DONE', edit: event.edit })
+        break
+      case 'coder_verify_done':
+        dispatch({ type: 'CODER_VERIFY_DONE', verification: event.verification })
+        break
+      case 'dialogue_msg':
+        dispatch({ type: 'DIALOGUE_MSG', message: event.message })
+        break
+      case 'dialogue_resolved':
+        dispatch({ type: 'DIALOGUE_RESOLVED', mergedCode: event.mergedCode })
+        break
+      case 'dialogue_escalated':
+        dispatch({ type: 'DIALOGUE_ESCALATED', summary: event.summary })
+        break
       case 'error':
         dispatch({ type: 'SET_ERROR', error: event.message })
         dispatch({ type: 'SET_PHASE', phase: 'error' })

@@ -1,10 +1,15 @@
 import { generateId } from '@/lib/utils'
 import type {
   AlignmentMessage,
+  CoderVerification,
+  DialogueMessage,
+  DialogueSummary,
   ModelAdapter,
   PipelineContext,
   PipelinePhase,
   Provider,
+  ReviewEdit,
+  ReviewHunk,
   ReviewPayload,
   SpecDocument,
   ThinkingOutput,
@@ -224,6 +229,77 @@ PSEUDO-CODE HINT RULES:
 
 Output raw JSON only. No markdown fences. No explanation before or after.`
 
+export const REVIEWER_EDIT_SYSTEM_PROMPT = `You are a code reviewer inside a multi-model coding pipeline.
+You previously reviewed code and flagged specific bugs. Your job now: produce surgical code edits ONLY at the exact locations you flagged.
+
+Return ONLY this exact JSON — no prose outside the JSON:
+{
+  "hunks": [
+    {
+      "location": "function name or line reference",
+      "original": "the exact code snippet as it appears in the file — must match character-for-character",
+      "replacement": "your corrected version of that exact snippet",
+      "reason": "one sentence — what bug this edit fixes"
+    }
+  ],
+  "reasoning": "one paragraph summarizing all the edits",
+  "resolves": ["f1", "f2"]
+}
+
+CRITICAL RULES:
+× NEVER touch code that is not directly related to the flagged issues
+× The "original" field must be copied verbatim from the provided code — not paraphrased
+× Only produce hunks for HIGH or MEDIUM severity issues — LOW issues do not need edits
+× If a flagged issue cannot be fixed with a targeted edit (requires architectural change), set hunks to [] and explain in reasoning
+× Output raw JSON only. No markdown fences.`
+
+export const CODER_VERIFY_SYSTEM_PROMPT = `You are the primary code generator in a multi-model pipeline.
+A reviewer has made edits to your code. Your job: evaluate each edit honestly.
+
+Return ONLY this exact JSON — no prose outside the JSON:
+{
+  "agrees": true,
+  "accepted_hunks": ["location1", "location2"],
+  "rejected_hunks": [],
+  "concerns": [],
+  "first_question": null
+}
+
+OR when you disagree:
+{
+  "agrees": false,
+  "accepted_hunks": ["location1"],
+  "rejected_hunks": ["location2"],
+  "concerns": ["The replacement at location2 introduces a null dereference when input is empty"],
+  "first_question": "Why did you replace the null check at location2 — doesn't that break the empty-input case?"
+}
+
+RULES:
+- agrees: true ONLY when you accept ALL hunks and believe the merged code is correct
+- For rejected_hunks: state exactly what is wrong with the reviewer's change in "concerns"
+- first_question: a single direct question to start the dialogue (required when agrees=false)
+- Be specific — "this change is wrong" is not useful; name the exact failure mode
+- Output raw JSON only. No markdown fences.`
+
+export const CODER_DIALOGUE_SYSTEM_PROMPT = `You are the primary code generator in a resolution dialogue with a reviewer.
+The reviewer has responded to your previous concern. Read their response and either:
+  a) Agree and end the dialogue — respond with a short message ending in "RESOLVED"
+  b) Raise your next concern as a direct question
+
+Keep your response under 100 words. Be direct and specific. No code — plain English only.`
+
+export const REVIEWER_DIALOGUE_SYSTEM_PROMPT = `You are a code reviewer in a resolution dialogue with the primary code generator.
+The coder has raised a concern about one of your edits. Respond to it directly.
+
+Return ONLY this exact JSON:
+{
+  "response": "your response to the coder's concern — plain English, under 100 words",
+  "resolved": false
+}
+
+Set resolved: true ONLY if the coder's last message signals they are satisfied (contains "RESOLVED").
+Output raw JSON only. No markdown fences.`
+
 // ─── JSON parsers ─────────────────────────────────────────────────────────────
 
 /**
@@ -374,6 +450,56 @@ export function parseReviewPayload(text: string, round: number): ReviewPayload {
     h.replace(/[{};]|function\s+\w+\s*\(|=>\s*{|\bif\s*\(|\bfor\s*\(|\bwhile\s*\(/g, '').trim()
   )
   return { ...result.data, pseudo_code_hints: cleanHints }
+}
+
+export function parseReviewEdit(text: string): ReviewEdit {
+  const raw = parseJSON<Record<string, unknown>>(text, 'reviewerEdit')
+  if (!raw) return { hunks: [], reasoning: 'Reviewer returned malformed JSON — skipping edits', resolves: [] }
+  const hunks: ReviewHunk[] = []
+  if (Array.isArray(raw.hunks)) {
+    for (const h of raw.hunks as Array<Record<string, unknown>>) {
+      if (typeof h.location === 'string' && typeof h.original === 'string' && typeof h.replacement === 'string') {
+        hunks.push({
+          location:    h.location,
+          original:    h.original,
+          replacement: h.replacement,
+          reason:      typeof h.reason === 'string' ? h.reason : '',
+        })
+      }
+    }
+  }
+  return {
+    hunks,
+    reasoning: typeof raw.reasoning === 'string' ? raw.reasoning : '',
+    resolves:  Array.isArray(raw.resolves) ? raw.resolves.map(String) : [],
+  }
+}
+
+export function parseCoderVerification(text: string): CoderVerification {
+  const raw = parseJSON<Record<string, unknown>>(text, 'coderVerify')
+  if (!raw) return {
+    agrees:         false,
+    accepted_hunks: [],
+    rejected_hunks: [],
+    concerns:       ['Coder returned malformed JSON — treating as disagreement'],
+    first_question: 'Could you clarify your intent for all the changes?',
+  }
+  return {
+    agrees:         Boolean(raw.agrees),
+    accepted_hunks: Array.isArray(raw.accepted_hunks) ? raw.accepted_hunks.map(String) : [],
+    rejected_hunks: Array.isArray(raw.rejected_hunks) ? raw.rejected_hunks.map(String) : [],
+    concerns:       Array.isArray(raw.concerns) ? raw.concerns.map(String) : [],
+    first_question: typeof raw.first_question === 'string' ? raw.first_question : undefined,
+  }
+}
+
+export function parseReviewerDialogueResponse(text: string): { response: string; resolved: boolean } {
+  const raw = parseJSON<Record<string, unknown>>(text, 'reviewerDialogue')
+  if (!raw) return { response: text.slice(0, 500), resolved: false }
+  return {
+    response: typeof raw.response === 'string' ? raw.response : text.slice(0, 500),
+    resolved: Boolean(raw.resolved),
+  }
 }
 
 // ─── Prompt builders ──────────────────────────────────────────────────────────
@@ -617,6 +743,105 @@ export function buildReviewPrompt(
   return parts.join('\n')
 }
 
+export function buildReviewerEditPrompt(
+  code: string,
+  spec: SpecDocument,
+  review: ReviewPayload,
+): string {
+  const highMedFlags = review.flags.filter(f => f.severity !== 'LOW')
+  const flagList = highMedFlags.map((f, i) => {
+    const loc = f.location ? ` (${f.location})` : ''
+    return `${i + 1}. [${f.severity}]${loc} ${f.description}`
+  }).join('\n')
+
+  return [
+    'TASK:',
+    spec.task_description,
+    '',
+    'YOUR REVIEW FLAGS (these are the issues to fix):',
+    flagList || '(no HIGH/MEDIUM flags — return empty hunks)',
+    '',
+    'CODE TO EDIT:',
+    '```',
+    code,
+    '```',
+    '',
+    'Produce surgical code hunks for ONLY the flagged issues above.',
+    'Copy the "original" field verbatim from the code — it must match exactly.',
+    'Return raw JSON only.',
+  ].join('\n')
+}
+
+export function buildCoderVerifyPrompt(
+  originalCode: string,
+  edit: ReviewEdit,
+  mergedCode: string,
+  review: ReviewPayload,
+): string {
+  const hunkList = edit.hunks.map((h, i) =>
+    `${i + 1}. [${h.location}]\n   Reason: ${h.reason}\n   Original:\n   ${h.original.slice(0, 200)}\n   Replacement:\n   ${h.replacement.slice(0, 200)}`
+  ).join('\n\n')
+
+  return [
+    `REVIEWER'S EDITS (round ${review.round}):`,
+    edit.reasoning,
+    '',
+    'INDIVIDUAL HUNKS:',
+    hunkList || '(no hunks — reviewer found no fix)',
+    '',
+    'MERGED CODE (original + reviewer edits applied):',
+    '```',
+    mergedCode.slice(0, 8000),
+    '```',
+    '',
+    'Evaluate each hunk. Do the reviewer\'s changes correctly fix the issues without introducing new bugs?',
+    'Return raw JSON only.',
+  ].join('\n')
+}
+
+export function buildCoderDialoguePrompt(
+  code: string,
+  dialogue: DialogueSummary,
+  verification: CoderVerification,
+): string {
+  const history = dialogue.messages.map(m =>
+    `[${m.actor.toUpperCase()} — Round ${m.round}]: ${m.content}`
+  ).join('\n\n')
+
+  return [
+    'DIALOGUE HISTORY:',
+    history || '(start of dialogue)',
+    '',
+    'YOUR CONCERNS SO FAR:',
+    (verification.concerns.join('\n') || verification.first_question) ?? '',
+    '',
+    'Respond to the reviewer\'s last message. If satisfied, end with "RESOLVED".',
+    'Plain English only — no code. Under 100 words.',
+  ].join('\n')
+}
+
+export function buildReviewerDialoguePrompt(
+  code: string,
+  dialogue: DialogueSummary,
+  review: ReviewPayload,
+): string {
+  const history = dialogue.messages.map(m =>
+    `[${m.actor.toUpperCase()} — Round ${m.round}]: ${m.content}`
+  ).join('\n\n')
+
+  return [
+    'ORIGINAL REVIEW REASONING:',
+    review.reasoning,
+    '',
+    'DIALOGUE HISTORY:',
+    history,
+    '',
+    'Respond to the coder\'s last concern. Plain English only — no code. Under 100 words.',
+    'If the coder says "RESOLVED", set resolved: true in your JSON response.',
+    'Return raw JSON only.',
+  ].join('\n')
+}
+
 // ─── OpenAI-compatible message builder ───────────────────────────────────────
 
 export type OpenAIMessage = {
@@ -647,6 +872,10 @@ export abstract class BaseAdapter implements ModelAdapter {
   abstract generate(prompt: string, ctx: PipelineContext): AsyncGenerator<string>
   abstract selfCheck(code: string, spec: SpecDocument, pass: 1 | 2): ReturnType<ModelAdapter['selfCheck']>
   abstract review(code: string, spec: SpecDocument, round: number, previousReview?: ReviewPayload): Promise<ReviewPayload>
+  abstract reviewerEdit(code: string, spec: SpecDocument, review: ReviewPayload, round: number): Promise<ReviewEdit>
+  abstract coderVerify(originalCode: string, edit: ReviewEdit, mergedCode: string, review: ReviewPayload): Promise<CoderVerification>
+  abstract coderDialogue(code: string, dialogue: DialogueSummary, verification: CoderVerification): Promise<string>
+  abstract reviewerDialogue(code: string, dialogue: DialogueSummary, review: ReviewPayload): Promise<{ response: string; resolved: boolean }>
   abstract getProvider(): Provider
   abstract getModelId(): string
 
@@ -687,6 +916,9 @@ export function phaseLabel(phase: PipelinePhase): string {
     phase3_generating:      'Phase 3: Generating',
     phase3_self_check:      'Phase 3: Self-Check',
     phase3_reviewing:       'Phase 3: Reviewing',
+    phase3_reviewer_edit:   'Phase 3: Reviewer Editing',
+    phase3_coder_verify:    'Phase 3: Coder Verifying',
+    phase3_dialogue:        'Phase 3: Model Dialogue',
     phase3_consensus:       'Phase 3: Consensus',
     conflict_escalated:     'Conflict Escalated',
     complete:               'Complete',

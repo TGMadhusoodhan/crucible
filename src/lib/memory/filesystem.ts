@@ -1,60 +1,30 @@
-// Redis-backed storage — replaces the Node.js filesystem layer.
-// Works identically on Vercel serverless and local dev.
-// Public API is unchanged so no other file needs to be updated.
-
-import { Redis } from '@upstash/redis'
+import fs   from 'fs'
+import path from 'path'
 import type { ConversationEvent, ProjectMemory, ReviewFlag, SpecDocument } from '@/types'
+import { estimateTokens } from '@/lib/utils/tokens'
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+// ─── Paths ────────────────────────────────────────────────────────────────────
 
-const CHARS_PER_TOKEN  = 4
-const MAX_LOG_TOKENS   = 40_000
-const MAX_LOG_ENTRIES  = 10_000   // list cap — trims oldest on append
-const MAX_REVIEW_ITEMS = 1_000
-const MAX_CHECKPOINTS  = 100
+const DATA_DIR = process.env.DATA_DIR ?? './data'
 
-const TTL_LOG  = 60 * 60 * 24 * 90    // session logs: 90 days
-const TTL_DATA = 60 * 60 * 24 * 365   // project data: 1 year
-
-// ─── Redis keys ───────────────────────────────────────────────────────────────
-
-const KEY = {
-  sessionLog:  (pid: string)              => `fs:${pid}:session_log`,
-  memory:      (pid: string)              => `fs:${pid}:memory`,
-  spec:        (pid: string)              => `fs:${pid}:spec`,
-  reviewList:  (pid: string)              => `fs:${pid}:reviews`,
-  config:      (pid: string)              => `fs:${pid}:config`,
-  checkpoints: (pid: string)              => `fs:${pid}:checkpoints`,
-  output:      (pid: string, f: string)   => `fs:${pid}:output:${f}`,
-  outputIndex: (pid: string)              => `fs:${pid}:output_files`,
+function projectDir(projectId: string): string {
+  return path.join(DATA_DIR, 'projects', projectId)
 }
 
-const _redis = new Redis({
-  url:   process.env.UPSTASH_REDIS_REST_URL!,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN!,
-})
-function getRedis(): Redis { return _redis }
-
-// Upstash may return list items as already-parsed objects or raw strings.
-// This helper handles both cases.
-function parseItem<T>(item: unknown): T | null {
-  if (item === null || item === undefined) return null
-  if (typeof item === 'string') {
-    try { return JSON.parse(item) as T } catch { return null }
-  }
-  return item as T
+function ensureDir(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true })
 }
 
-// ─── Kept for backward compat (path helpers no longer meaningful) ─────────────
+// ─── Project init ─────────────────────────────────────────────────────────────
 
-export function projectDir(_id: string): string { return '' }
-export const ensureProjectDir = async (_id: string) => {}
+export function initProject(projectId: string): void {
+  ensureDir(projectDir(projectId))
+  ensureDir(path.join(projectDir(projectId), 'output'))
+}
 
-// ─── Project init (no-op — Redis needs no directory creation) ────────────────
+export { estimateTokens }
 
-export async function initProject(_projectId: string): Promise<void> {}
-
-// ─── Default memory structure ─────────────────────────────────────────────────
+// ─── Default memory ───────────────────────────────────────────────────────────
 
 export function defaultMemory(): ProjectMemory {
   return {
@@ -75,180 +45,145 @@ export function defaultMemory(): ProjectMemory {
   }
 }
 
-// ─── memory.json → Redis string ───────────────────────────────────────────────
+// ─── Memory ───────────────────────────────────────────────────────────────────
 
-export async function readMemory(projectId: string): Promise<ProjectMemory> {
+export function readMemory(projectId: string): ProjectMemory {
+  const file = path.join(projectDir(projectId), 'memory.json')
   try {
-    const raw = await getRedis().get<unknown>(KEY.memory(projectId))
-    return parseItem<ProjectMemory>(raw) ?? defaultMemory()
+    if (!fs.existsSync(file)) return defaultMemory()
+    return JSON.parse(fs.readFileSync(file, 'utf8')) as ProjectMemory
   } catch {
     return defaultMemory()
   }
 }
 
-export async function writeMemory(projectId: string, memory: ProjectMemory): Promise<void> {
-  try {
-    await getRedis().set(KEY.memory(projectId), JSON.stringify(memory), { ex: TTL_DATA })
-  } catch { /* best-effort */ }
+export function writeMemory(projectId: string, memory: ProjectMemory): void {
+  ensureDir(projectDir(projectId))
+  fs.writeFileSync(
+    path.join(projectDir(projectId), 'memory.json'),
+    JSON.stringify(memory, null, 2),
+  )
 }
 
-// ─── session_log.jsonl → Redis list ──────────────────────────────────────────
+// ─── Session log ─────────────────────────────────────────────────────────────
 
-export async function appendSessionLog(projectId: string, event: ConversationEvent): Promise<void> {
-  try {
-    const redis = getRedis()
-    await redis.rpush(KEY.sessionLog(projectId), JSON.stringify(event))
-    // Trim the list so it never grows unbounded
-    await redis.ltrim(KEY.sessionLog(projectId), -MAX_LOG_ENTRIES, -1)
-    await redis.expire(KEY.sessionLog(projectId), TTL_LOG)
-  } catch { /* best-effort */ }
+const MAX_LOG_TOKENS  = 40_000
+const CHARS_PER_TOKEN = 4
+
+export function appendSessionLog(projectId: string, event: ConversationEvent): void {
+  ensureDir(projectDir(projectId))
+  const file = path.join(projectDir(projectId), 'session.jsonl')
+  fs.appendFileSync(file, JSON.stringify(event) + '\n')
 }
 
-export async function readRecentSessionLog(
+export function readRecentSessionLog(
   projectId: string,
   maxTokens = MAX_LOG_TOKENS,
-): Promise<ConversationEvent[]> {
+): ConversationEvent[] {
+  const file = path.join(projectDir(projectId), 'session.jsonl')
   try {
-    const redis = getRedis()
-    // Read the tail of the list, then trim to token budget
-    const raw = await redis.lrange(KEY.sessionLog(projectId), -2000, -1)
-    if (!raw || raw.length === 0) return []
-
+    if (!fs.existsSync(file)) return []
+    const lines = fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean)
     const events: ConversationEvent[] = []
     let charCount = 0
     const maxChars = maxTokens * CHARS_PER_TOKEN
-
-    for (let i = raw.length - 1; i >= 0; i--) {
-      const item = raw[i]
-      const line = typeof item === 'string' ? item : JSON.stringify(item)
-      charCount += line.length
+    for (let i = lines.length - 1; i >= 0; i--) {
+      charCount += (lines[i]?.length ?? 0)
       if (charCount > maxChars) break
-      const parsed = parseItem<ConversationEvent>(item)
-      if (parsed) events.unshift(parsed)
+      try { events.unshift(JSON.parse(lines[i]!) as ConversationEvent) } catch { /* skip */ }
     }
-
     return events
   } catch {
     return []
   }
 }
 
-export async function readFullSessionLog(projectId: string): Promise<ConversationEvent[]> {
+export function readFullSessionLog(projectId: string): ConversationEvent[] {
+  const file = path.join(projectDir(projectId), 'session.jsonl')
   try {
-    const raw = await getRedis().lrange(KEY.sessionLog(projectId), 0, -1)
-    if (!raw) return []
-    return raw.flatMap(item => {
-      const parsed = parseItem<ConversationEvent>(item)
-      return parsed ? [parsed] : []
-    })
+    if (!fs.existsSync(file)) return []
+    return fs.readFileSync(file, 'utf8')
+      .trim().split('\n').filter(Boolean)
+      .flatMap(line => { try { return [JSON.parse(line) as ConversationEvent] } catch { return [] } })
   } catch {
     return []
   }
 }
 
-// ─── spec.json → Redis string (write-once guard preserved) ───────────────────
+// ─── Spec ─────────────────────────────────────────────────────────────────────
 
-export async function writeSpec(projectId: string, spec: SpecDocument): Promise<void> {
-  try {
-    const redis = getRedis()
-    const exists = await redis.exists(KEY.spec(projectId))
-    if (exists) {
-      throw new Error(`spec already exists for project ${projectId}. The spec cannot be overwritten.`)
-    }
-    await redis.set(KEY.spec(projectId), JSON.stringify(spec), { ex: TTL_DATA })
-  } catch (err) {
-    if (err instanceof Error && err.message.includes('already exists')) throw err
-    // Swallow all other errors (best-effort)
+export function writeSpec(projectId: string, spec: SpecDocument): void {
+  const file = path.join(projectDir(projectId), 'spec.json')
+  if (fs.existsSync(file)) {
+    throw new Error(`spec already exists for project ${projectId}. The spec cannot be overwritten.`)
   }
+  ensureDir(projectDir(projectId))
+  fs.writeFileSync(file, JSON.stringify(spec, null, 2))
 }
 
-export async function readSpec(projectId: string): Promise<SpecDocument | null> {
+export function readSpec(projectId: string): SpecDocument | null {
+  const file = path.join(projectDir(projectId), 'spec.json')
   try {
-    const raw = await getRedis().get<unknown>(KEY.spec(projectId))
-    return parseItem<SpecDocument>(raw)
+    if (!fs.existsSync(file)) return null
+    return JSON.parse(fs.readFileSync(file, 'utf8')) as SpecDocument
   } catch {
     return null
   }
 }
 
-export async function specExists(projectId: string): Promise<boolean> {
-  try {
-    return (await getRedis().exists(KEY.spec(projectId))) > 0
-  } catch {
-    return false
-  }
+export function specExists(projectId: string): boolean {
+  return fs.existsSync(path.join(projectDir(projectId), 'spec.json'))
 }
 
-// ─── review_list.json → Redis list ───────────────────────────────────────────
+// ─── Review list ─────────────────────────────────────────────────────────────
 
-export async function appendReviewList(projectId: string, flag: ReviewFlag): Promise<void> {
-  try {
-    const redis = getRedis()
-    await redis.rpush(KEY.reviewList(projectId), JSON.stringify(flag))
-    await redis.ltrim(KEY.reviewList(projectId), -MAX_REVIEW_ITEMS, -1)
-    await redis.expire(KEY.reviewList(projectId), TTL_DATA)
-  } catch { /* best-effort */ }
+export function appendReviewList(projectId: string, flag: ReviewFlag): void {
+  ensureDir(projectDir(projectId))
+  fs.appendFileSync(
+    path.join(projectDir(projectId), 'reviews.jsonl'),
+    JSON.stringify(flag) + '\n',
+  )
 }
 
-export async function readReviewList(projectId: string): Promise<ReviewFlag[]> {
+export function readReviewList(projectId: string): ReviewFlag[] {
+  const file = path.join(projectDir(projectId), 'reviews.jsonl')
   try {
-    const raw = await getRedis().lrange(KEY.reviewList(projectId), 0, -1)
-    if (!raw) return []
-    return raw.flatMap(item => {
-      const parsed = parseItem<ReviewFlag>(item)
-      return parsed ? [parsed] : []
-    })
+    if (!fs.existsSync(file)) return []
+    return fs.readFileSync(file, 'utf8')
+      .trim().split('\n').filter(Boolean)
+      .flatMap(line => { try { return [JSON.parse(line) as ReviewFlag] } catch { return [] } })
   } catch {
     return []
   }
 }
 
-// ─── config.json → Redis string ──────────────────────────────────────────────
+// ─── Output files ─────────────────────────────────────────────────────────────
 
-export async function readProjectConfig(projectId: string): Promise<Record<string, unknown>> {
-  try {
-    const raw = await getRedis().get<unknown>(KEY.config(projectId))
-    return parseItem<Record<string, unknown>>(raw) ?? {}
-  } catch {
-    return {}
-  }
-}
-
-export async function writeProjectConfig(projectId: string, config: Record<string, unknown>): Promise<void> {
-  try {
-    await getRedis().set(KEY.config(projectId), JSON.stringify(config), { ex: TTL_DATA })
-  } catch { /* best-effort */ }
-}
-
-// ─── output/ → Redis strings + index set ─────────────────────────────────────
-
-export async function writeOutput(projectId: string, filename: string, content: string): Promise<void> {
-  try {
-    const redis = getRedis()
-    await redis.set(KEY.output(projectId, filename), content, { ex: TTL_DATA })
-    await redis.sadd(KEY.outputIndex(projectId), filename)
-    await redis.expire(KEY.outputIndex(projectId), TTL_DATA)
-  } catch { /* best-effort */ }
+export function writeOutput(projectId: string, filename: string, content: string): void {
+  const dir = path.join(projectDir(projectId), 'output')
+  ensureDir(dir)
+  fs.writeFileSync(path.join(dir, filename), content)
 }
 
 export const writeOutputFile = writeOutput
 
-export async function readOutputFile(projectId: string, filename: string): Promise<string> {
-  const raw = await getRedis().get<unknown>(KEY.output(projectId, filename))
-  if (raw === null || raw === undefined) throw new Error(`Output file not found: ${filename}`)
-  return typeof raw === 'string' ? raw : JSON.stringify(raw)
+export function readOutputFile(projectId: string, filename: string): string {
+  const file = path.join(projectDir(projectId), 'output', filename)
+  if (!fs.existsSync(file)) throw new Error(`Output file not found: ${filename}`)
+  return fs.readFileSync(file, 'utf8')
 }
 
-export async function listOutputFiles(projectId: string): Promise<string[]> {
+export function listOutputFiles(projectId: string): string[] {
+  const dir = path.join(projectDir(projectId), 'output')
   try {
-    const members = await getRedis().smembers<string[]>(KEY.outputIndex(projectId))
-    return members ?? []
+    if (!fs.existsSync(dir)) return []
+    return fs.readdirSync(dir)
   } catch {
     return []
   }
 }
 
-// ─── checkpoints/ → Redis list ───────────────────────────────────────────────
+// ─── Checkpoints ─────────────────────────────────────────────────────────────
 
 export interface CheckpointData {
   id:             string
@@ -259,34 +194,34 @@ export interface CheckpointData {
   memory:         ProjectMemory
 }
 
-export async function saveCheckpoint(
+export function saveCheckpoint(
   projectId: string,
   trigger:   'module_complete' | 'conflict_resolved' | 'human_confirm' | 'manual',
   summary:   string,
   outputSnapshot: Record<string, string> = {},
-): Promise<string> {
-  const id = `${Date.now()}_${trigger}`
-  try {
-    const redis    = getRedis()
-    const memory   = await readMemory(projectId)
-    const payload: CheckpointData = { id, trigger, summary, timestamp: Date.now(), outputSnapshot, memory }
-    await redis.rpush(KEY.checkpoints(projectId), JSON.stringify(payload))
-    await redis.ltrim(KEY.checkpoints(projectId), -MAX_CHECKPOINTS, -1)
-    await redis.expire(KEY.checkpoints(projectId), TTL_DATA)
-  } catch { /* best-effort */ }
+): string {
+  const id      = `${Date.now()}_${trigger}`
+  const memory  = readMemory(projectId)
+  const payload: CheckpointData = { id, trigger, summary, timestamp: Date.now(), outputSnapshot, memory }
+  const dir     = path.join(projectDir(projectId), 'checkpoints')
+  ensureDir(dir)
+  fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify(payload, null, 2))
   return id
 }
 
-export async function listCheckpoints(
+export function listCheckpoints(
   projectId: string,
-): Promise<Array<Pick<CheckpointData, 'id' | 'trigger' | 'timestamp' | 'summary'>>> {
+): Array<Pick<CheckpointData, 'id' | 'trigger' | 'timestamp' | 'summary'>> {
+  const dir = path.join(projectDir(projectId), 'checkpoints')
   try {
-    const raw = await getRedis().lrange(KEY.checkpoints(projectId), 0, -1)
-    if (!raw) return []
-    return raw
-      .flatMap(item => {
-        const parsed = parseItem<CheckpointData>(item)
-        return parsed ? [{ id: parsed.id, trigger: parsed.trigger, timestamp: parsed.timestamp, summary: parsed.summary }] : []
+    if (!fs.existsSync(dir)) return []
+    return fs.readdirSync(dir)
+      .filter(f => f.endsWith('.json'))
+      .flatMap(f => {
+        try {
+          const cp = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as CheckpointData
+          return [{ id: cp.id, trigger: cp.trigger, timestamp: cp.timestamp, summary: cp.summary }]
+        } catch { return [] }
       })
       .sort((a, b) => b.timestamp - a.timestamp)
   } catch {
@@ -294,5 +229,24 @@ export async function listCheckpoints(
   }
 }
 
-// ─── Token estimation — re-exported from canonical location ──────────────────
-export { estimateTokens } from '@/lib/utils/tokens'
+// ─── Project config ───────────────────────────────────────────────────────────
+
+export function readProjectConfig(projectId: string): Record<string, unknown> {
+  const file = path.join(projectDir(projectId), 'config.json')
+  try {
+    if (!fs.existsSync(file)) return {}
+    return JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>
+  } catch {
+    return {}
+  }
+}
+
+export function writeProjectConfig(projectId: string, config: Record<string, unknown>): void {
+  ensureDir(projectDir(projectId))
+  fs.writeFileSync(path.join(projectDir(projectId), 'config.json'), JSON.stringify(config, null, 2))
+}
+
+// ─── Compat stubs ─────────────────────────────────────────────────────────────
+
+export function projectDir_(id: string): string { return projectDir(id) }
+export const ensureProjectDir = (id: string) => ensureDir(projectDir(id))

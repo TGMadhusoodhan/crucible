@@ -4,10 +4,14 @@ import { createContext, createElement, useContext, useReducer, type Dispatch, ty
 import type {
   AlignmentMessage,
   BudgetStatus,
+  CoderVerification,
   ConsensusOutput,
   Contradiction,
+  DialogueMessage,
+  DialogueSummary,
   PipelinePhase,
   Question,
+  ReviewEdit,
   ReviewPayload,
   SelfCheckOutput,
   SpecDocument,
@@ -52,6 +56,11 @@ export interface PipelineState {
   selfCheckOutput:  SelfCheckOutput | null
   lastReview:       ReviewPayload | null
 
+  // Phase 3b: Reviewer edit + coder verify + dialogue
+  reviewerEdit:     ReviewEdit | null
+  coderVerification: CoderVerification | null
+  dialogue:         DialogueSummary | null
+
   // Output (consensus-validated)
   output:           ConsensusOutput | null
 
@@ -79,6 +88,9 @@ const initialState: PipelineState = {
   streamingCode:     '',
   selfCheckOutput:   null,
   lastReview:        null,
+  reviewerEdit:      null,
+  coderVerification: null,
+  dialogue:          null,
   output:            null,
   conflictReason:    null,
   isStreaming:       false,
@@ -104,6 +116,11 @@ export type PipelineAction =
   | { type: 'REVIEW_DONE';        review: ReviewPayload }
   | { type: 'CONSENSUS';          output: ConsensusOutput }
   | { type: 'CONFLICT_ESCALATED'; review: ReviewPayload; round: number; reason: string }
+  | { type: 'REVIEWER_EDIT_DONE'; edit: ReviewEdit }
+  | { type: 'CODER_VERIFY_DONE';  verification: CoderVerification }
+  | { type: 'DIALOGUE_MSG';       message: DialogueMessage }
+  | { type: 'DIALOGUE_RESOLVED';  mergedCode: string }
+  | { type: 'DIALOGUE_ESCALATED'; summary: DialogueSummary }
   | { type: 'SET_STREAMING';      value: boolean }
   | { type: 'SET_BUDGET';         budget: BudgetStatus }
   | { type: 'SET_ERROR';          error: string }
@@ -184,6 +201,35 @@ function reducer(state: PipelineState, action: PipelineAction): PipelineState {
         lastReview:    action.review,
         round:         action.round,
         conflictReason: action.reason,
+        phase:         'conflict_escalated',
+        isStreaming:   false,
+      }
+
+    case 'REVIEWER_EDIT_DONE':
+      return { ...state, reviewerEdit: action.edit }
+
+    case 'CODER_VERIFY_DONE':
+      return { ...state, coderVerification: action.verification }
+
+    case 'DIALOGUE_MSG':
+      return {
+        ...state,
+        dialogue: state.dialogue
+          ? { ...state.dialogue, messages: [...state.dialogue.messages, action.message], rounds: action.message.round }
+          : { messages: [action.message], rounds: action.message.round, resolved: false, coderFinalPosition: '', reviewerFinalPosition: '' },
+      }
+
+    case 'DIALOGUE_RESOLVED':
+      return {
+        ...state,
+        dialogue: state.dialogue ? { ...state.dialogue, resolved: true } : null,
+        streamingCode: action.mergedCode,
+      }
+
+    case 'DIALOGUE_ESCALATED':
+      return {
+        ...state,
+        dialogue:      action.summary,
         phase:         'conflict_escalated',
         isStreaming:   false,
       }

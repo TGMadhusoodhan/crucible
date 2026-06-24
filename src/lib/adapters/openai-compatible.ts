@@ -3,8 +3,11 @@ import type { ChatCompletionMessageParam } from 'openai/resources/chat/completio
 import { generateId } from '@/lib/utils'
 import type {
   AlignmentMessage,
+  CoderVerification,
+  DialogueSummary,
   PipelineContext,
   Provider,
+  ReviewEdit,
   ReviewPayload,
   SelfCheckOutput,
   SpecDocument,
@@ -12,21 +15,32 @@ import type {
 } from '@/types'
 import {
   ALIGNMENT_SYSTEM_PROMPT,
+  CODER_DIALOGUE_SYSTEM_PROMPT,
+  CODER_VERIFY_SYSTEM_PROMPT,
   GENERATION_SYSTEM_PROMPT,
+  REVIEWER_DIALOGUE_SYSTEM_PROMPT,
+  REVIEWER_EDIT_SYSTEM_PROMPT,
   REVIEWER_SYSTEM_PROMPT,
   SELF_CHECK_SYSTEM_PROMPT,
   THINKING_SYSTEM_PROMPT,
   BaseAdapter,
   buildAlignmentPrompt,
+  buildCoderDialoguePrompt,
+  buildCoderVerifyPrompt,
   buildGenerationPrompt,
   buildOpenAIMessages,
   buildReviewPrompt,
+  buildReviewerDialoguePrompt,
+  buildReviewerEditPrompt,
   buildSelfCheckPrompt,
   buildThinkingConversionPrompt,
   buildThinkingPrompt,
   isUnparseableThinkingOutput,
+  parseCoderVerification,
   parseJSON,
+  parseReviewEdit,
   parseReviewPayload,
+  parseReviewerDialogueResponse,
   parseSelfCheckOutput,
   parseThinkingOutput,
 } from './base'
@@ -214,6 +228,88 @@ export abstract class OpenAICompatibleAdapter extends BaseAdapter {
       return parseReviewPayload(text, round)
     } catch (err) {
       throw this.wrapError(err, 'review')
+    }
+  }
+
+  // ─── Phase 3b: Reviewer Edit ────────────────────────────────────────────────
+
+  async reviewerEdit(code: string, spec: SpecDocument, review: ReviewPayload, round: number): Promise<ReviewEdit> {
+    const prompt = buildReviewerEditPrompt(code, spec, review)
+    try {
+      const res = await this.client.chat.completions.create({
+        model:      this.modelId,
+        max_tokens: 8192,
+        ...(this.supportsJsonMode() && { response_format: { type: 'json_object' } }),
+        messages: [
+          { role: 'system', content: REVIEWER_EDIT_SYSTEM_PROMPT },
+          { role: 'user',   content: prompt },
+        ],
+      })
+      const text = res.choices[0]?.message?.content ?? ''
+      return parseReviewEdit(text)
+    } catch (err) {
+      throw this.wrapError(err, `reviewerEdit:round${round}`)
+    }
+  }
+
+  // ─── Phase 3b: Coder Verify ─────────────────────────────────────────────────
+
+  async coderVerify(originalCode: string, edit: ReviewEdit, mergedCode: string, review: ReviewPayload): Promise<CoderVerification> {
+    const prompt = buildCoderVerifyPrompt(originalCode, edit, mergedCode, review)
+    try {
+      const res = await this.client.chat.completions.create({
+        model:      this.modelId,
+        max_tokens: 4096,
+        ...(this.supportsJsonMode() && { response_format: { type: 'json_object' } }),
+        messages: [
+          { role: 'system', content: CODER_VERIFY_SYSTEM_PROMPT },
+          { role: 'user',   content: prompt },
+        ],
+      })
+      const text = res.choices[0]?.message?.content ?? ''
+      return parseCoderVerification(text)
+    } catch (err) {
+      throw this.wrapError(err, 'coderVerify')
+    }
+  }
+
+  // ─── Phase 3b: Coder Dialogue ───────────────────────────────────────────────
+
+  async coderDialogue(code: string, dialogue: DialogueSummary, verification: CoderVerification): Promise<string> {
+    const prompt = buildCoderDialoguePrompt(code, dialogue, verification)
+    try {
+      const res = await this.client.chat.completions.create({
+        model:      this.modelId,
+        max_tokens: 512,
+        messages: [
+          { role: 'system', content: CODER_DIALOGUE_SYSTEM_PROMPT },
+          { role: 'user',   content: prompt },
+        ],
+      })
+      return res.choices[0]?.message?.content?.trim() ?? 'No response'
+    } catch (err) {
+      throw this.wrapError(err, 'coderDialogue')
+    }
+  }
+
+  // ─── Phase 3b: Reviewer Dialogue ────────────────────────────────────────────
+
+  async reviewerDialogue(code: string, dialogue: DialogueSummary, review: ReviewPayload): Promise<{ response: string; resolved: boolean }> {
+    const prompt = buildReviewerDialoguePrompt(code, dialogue, review)
+    try {
+      const res = await this.client.chat.completions.create({
+        model:      this.modelId,
+        max_tokens: 512,
+        ...(this.supportsJsonMode() && { response_format: { type: 'json_object' } }),
+        messages: [
+          { role: 'system', content: REVIEWER_DIALOGUE_SYSTEM_PROMPT },
+          { role: 'user',   content: prompt },
+        ],
+      })
+      const text = res.choices[0]?.message?.content ?? ''
+      return parseReviewerDialogueResponse(text)
+    } catch (err) {
+      throw this.wrapError(err, 'reviewerDialogue')
     }
   }
 

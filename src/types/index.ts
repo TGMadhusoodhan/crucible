@@ -264,6 +264,44 @@ export interface ConsensusOutput {
   checkpoint_id: string
 }
 
+// ─── Phase 3 — Reviewer Edit + Coder Verify + Dialogue ───────────────────────
+
+export interface ReviewHunk {
+  location:    string   // function name or line reference
+  original:    string   // exact snippet from current code
+  replacement: string   // reviewer's corrected version
+  reason:      string   // one sentence — why this edit
+}
+
+export interface ReviewEdit {
+  hunks:     ReviewHunk[]
+  reasoning: string      // overall explanation
+  resolves:  string[]    // flag IDs from the prior ReviewPayload this edit addresses
+}
+
+export interface CoderVerification {
+  agrees:         boolean
+  accepted_hunks: string[]   // location strings of accepted hunks
+  rejected_hunks: string[]   // location strings of disputed hunks
+  concerns:       string[]   // plain English concerns about rejected hunks
+  first_question?: string    // first dialogue question to reviewer (when agrees=false)
+}
+
+export interface DialogueMessage {
+  actor:    'coder' | 'reviewer'
+  content:  string
+  round:    number
+  resolved?: boolean
+}
+
+export interface DialogueSummary {
+  messages:              DialogueMessage[]
+  rounds:                number
+  resolved:              boolean
+  coderFinalPosition:    string
+  reviewerFinalPosition: string
+}
+
 // ─── Pipeline Context (passed to generate / review) ──────────────────────────
 
 export interface Message {
@@ -308,6 +346,18 @@ export interface ModelAdapter {
   // Phase 3: cross-model code review — returns structured JSON flags only
   review(code: string, spec: SpecDocument, round: number, previousReview?: ReviewPayload): Promise<ReviewPayload>
 
+  // Phase 3b: reviewer produces surgical code hunks for its own flagged issues
+  reviewerEdit(code: string, spec: SpecDocument, review: ReviewPayload, round: number): Promise<ReviewEdit>
+
+  // Phase 3b: coder evaluates whether reviewer's hunks solve the issues
+  coderVerify(originalCode: string, edit: ReviewEdit, mergedCode: string, review: ReviewPayload): Promise<CoderVerification>
+
+  // Phase 3b: coder's turn in dialogue
+  coderDialogue(code: string, dialogue: DialogueSummary, verification: CoderVerification): Promise<string>
+
+  // Phase 3b: reviewer's turn in dialogue
+  reviewerDialogue(code: string, dialogue: DialogueSummary, review: ReviewPayload): Promise<{ response: string; resolved: boolean }>
+
   // Metadata
   getProvider(): Provider
   getModelId(): string
@@ -329,6 +379,9 @@ export type PipelinePhase =
   | 'phase3_generating'
   | 'phase3_self_check'
   | 'phase3_reviewing'
+  | 'phase3_reviewer_edit'
+  | 'phase3_coder_verify'
+  | 'phase3_dialogue'
   | 'phase3_consensus'
   | 'conflict_escalated'
   | 'complete'
@@ -368,6 +421,10 @@ export interface PipelineSessionState {
   generatedCode?: string
   selfCheckOutput?: SelfCheckOutput
   lastReview?: ReviewPayload
+  reviewerEdit?: ReviewEdit
+  mergedCode?: string
+  coderVerification?: CoderVerification
+  dialogue?: DialogueSummary
   output?: ConsensusOutput
   pendingHumanOverrides: string[]
   conversationHistory: Message[]
@@ -391,6 +448,9 @@ export type ConversationEventType =
   | 'generation_output'
   | 'self_check'
   | 'review_output'
+  | 'reviewer_edit'
+  | 'coder_verify'
+  | 'dialogue_message'
   | 'output_promoted'
   | 'checkpoint'
   | 'human_override'
@@ -519,6 +579,11 @@ export type SSEEvent =
   | { type: 'self_check_done'; output: SelfCheckOutput }
   | { type: 'review_done';     review: ReviewPayload }
   | { type: 'consensus';       output: ConsensusOutput }
-  | { type: 'conflict';        review: ReviewPayload; round: number }
-  | { type: 'error';           message: string; phase: PipelinePhase }
+  | { type: 'conflict';            review: ReviewPayload; round: number }
+  | { type: 'reviewer_edit_done';  edit: ReviewEdit }
+  | { type: 'coder_verify_done';   verification: CoderVerification }
+  | { type: 'dialogue_msg';        message: DialogueMessage }
+  | { type: 'dialogue_resolved';   mergedCode: string }
+  | { type: 'dialogue_escalated';  summary: DialogueSummary }
+  | { type: 'error';               message: string; phase: PipelinePhase }
   | { type: 'done' }

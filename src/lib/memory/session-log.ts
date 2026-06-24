@@ -60,7 +60,7 @@ function makeEvent(
 
 // ─── Phase 0 ──────────────────────────────────────────────────────────────────
 
-export function logPhaseStart(
+export async function logPhaseStart(
   projectId: string,
   sessionId: string,
   phase: PipelinePhase,
@@ -69,12 +69,12 @@ export function logPhaseStart(
   const event = makeEvent(sessionId, phase, 'system', 'progress', `Starting ${label}`, {
     type: 'phase_start',
   })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
 // ─── Phase 1 — Thinking ───────────────────────────────────────────────────────
 
-export function logThinkingDone(
+export async function logThinkingDone(
   projectId: string,
   sessionId: string,
   actor: 'primary' | 'reviewer',
@@ -98,12 +98,12 @@ export function logThinkingDone(
     tokensIn:    output.tokens_used,
     fullContent,
   })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
 // ─── Phase 1.5 — Alignment ────────────────────────────────────────────────────
 
-export function logAlignmentMessage(
+export async function logAlignmentMessage(
   projectId: string,
   sessionId: string,
   message: AlignmentMessage,
@@ -123,10 +123,10 @@ export function logAlignmentMessage(
         : '',
     ].filter(Boolean).join('\n'),
   })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
-export function logAlignmentConflict(
+export async function logAlignmentConflict(
   projectId: string,
   sessionId: string,
   conflictDescription: string,
@@ -136,12 +136,12 @@ export function logAlignmentConflict(
     type:        'alignment_conflict',
     fullContent: conflictDescription,
   })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
 // ─── Phase 2 — Questions ──────────────────────────────────────────────────────
 
-export function logQuestionsReady(
+export async function logQuestionsReady(
   projectId: string,
   sessionId: string,
   questions: Question[],
@@ -154,10 +154,10 @@ export function logQuestionsReady(
     type: 'question_generated',
     fullContent,
   })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
-export function logUserAnswers(
+export async function logUserAnswers(
   projectId: string,
   sessionId: string,
   answers: Record<string, string>,
@@ -176,12 +176,12 @@ export function logUserAnswers(
     type: 'user_answer',
     fullContent,
   })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
 // ─── Phase 2 — Spec ───────────────────────────────────────────────────────────
 
-export function logSpecWritten(
+export async function logSpecWritten(
   projectId: string,
   sessionId: string,
   spec: SpecDocument,
@@ -191,10 +191,10 @@ export function logSpecWritten(
     type:        'spec_written',
     fullContent: JSON.stringify(spec, null, 2),
   })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
-export function logSpecConfirmed(
+export async function logSpecConfirmed(
   projectId: string,
   sessionId: string,
 ): Promise<void> {
@@ -202,12 +202,12 @@ export function logSpecConfirmed(
     'Human confirmed the spec — proceeding to code generation', {
     type: 'spec_confirmed',
   })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
 // ─── Phase 3 — Generation ────────────────────────────────────────────────────
 
-export function logGenerationStart(
+export async function logGenerationStart(
   projectId: string,
   sessionId: string,
   round: number,
@@ -218,10 +218,10 @@ export function logGenerationStart(
     type:  'generation_start',
     round,
   })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
-export function logGenerationDone(
+export async function logGenerationDone(
   projectId: string,
   sessionId: string,
   round: number,
@@ -237,12 +237,12 @@ export function logGenerationDone(
     tokensOut,
     costUsd,
   })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
 // ─── Phase 3 — Self-Check ─────────────────────────────────────────────────────
 
-export function logSelfCheck(
+export async function logSelfCheck(
   projectId: string,
   sessionId: string,
   output: SelfCheckOutput,
@@ -266,12 +266,12 @@ export function logSelfCheck(
     fullContent,
     costUsd,
   })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
 // ─── Phase 3 — Review ────────────────────────────────────────────────────────
 
-export function logReview(
+export async function logReview(
   projectId: string,
   sessionId: string,
   review: ReviewPayload,
@@ -305,10 +305,10 @@ export function logReview(
     isConsensus: review.consensus,
     isConflict:  !review.consensus,
   })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
-export function logOutputPromoted(
+export async function logOutputPromoted(
   projectId: string,
   sessionId: string,
   checkpointId: string,
@@ -318,12 +318,12 @@ export function logOutputPromoted(
     type:       'output_promoted',
     isConsensus: true,
   })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
 // ─── Human override ───────────────────────────────────────────────────────────
 
-export function logHumanOverride(
+export async function logHumanOverride(
   projectId: string,
   sessionId: string,
   phase: PipelinePhase,
@@ -335,10 +335,10 @@ export function logHumanOverride(
     fullContent:    message,
     isHumanOverride: true,
   })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
-export function logConflictEscalated(
+export async function logConflictEscalated(
   projectId: string,
   sessionId: string,
   round: number,
@@ -351,27 +351,27 @@ export function logConflictEscalated(
     fullContent: reason,
     isConflict:  true,
   })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
 // ─── Pipeline controls ────────────────────────────────────────────────────────
 
-export function logPause(projectId: string, sessionId: string, phase: PipelinePhase): Promise<void> {
+export async function logPause(projectId: string, sessionId: string, phase: PipelinePhase): Promise<void> {
   const event = makeEvent(sessionId, phase, 'human', 'user', 'Pipeline paused by human', { type: 'pause' })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
-export function logPlay(projectId: string, sessionId: string, phase: PipelinePhase): Promise<void> {
+export async function logPlay(projectId: string, sessionId: string, phase: PipelinePhase): Promise<void> {
   const event = makeEvent(sessionId, phase, 'human', 'user', 'Pipeline resumed', { type: 'play' })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
-export function logStop(projectId: string, sessionId: string, phase: PipelinePhase): Promise<void> {
+export async function logStop(projectId: string, sessionId: string, phase: PipelinePhase): Promise<void> {
   const event = makeEvent(sessionId, phase, 'human', 'user', 'Pipeline stopped by human', { type: 'stop' })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }
 
-export function logBudgetModeChange(
+export async function logBudgetModeChange(
   projectId: string,
   sessionId: string,
   phase: PipelinePhase,
@@ -379,5 +379,5 @@ export function logBudgetModeChange(
 ): Promise<void> {
   const event = makeEvent(sessionId, phase, 'system', 'warning',
     `Budget mode changed to ${newMode}`, { type: 'budget_mode_change', fullContent: `New mode: ${newMode}` })
-  return appendSessionLog(projectId, event)
+  appendSessionLog(projectId, event)
 }

@@ -1,27 +1,9 @@
-import { auth } from '@clerk/nextjs/server'
-import { Redis } from '@upstash/redis'
+import { desc } from 'drizzle-orm'
 import { NextResponse, type NextRequest } from 'next/server'
 import { z } from 'zod'
+import { db, schema } from '@/lib/db'
 import { generateId } from '@/lib/utils'
-import type { ApiResponse, Provider } from '@/types'
-
-interface ProjectData {
-  id: string
-  userId: string
-  name: string
-  description: string
-  primaryProvider: Provider
-  primaryModelId: string
-  reviewerProvider: Provider
-  reviewerModelId: string
-  createdAt: number
-}
-
-const _redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL!,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN!,
-})
-function getRedis() { return _redis }
+import type { ApiResponse } from '@/types'
 
 const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together'] as const
 
@@ -34,36 +16,21 @@ const createSchema = z.object({
   reviewerModelId:  z.string().min(1),
 })
 
-// GET /api/projects — list all projects for current user
 export async function GET(): Promise<NextResponse<ApiResponse>> {
   try {
-    const { userId } = await auth()
-    if (!userId) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
-
-    const redis = getRedis()
-    const ids = await redis.smembers<string[]>(`projects:${userId}`)
-    if (!ids.length) return NextResponse.json({ success: true, data: [] })
-
-    const projects = await Promise.all(
-      ids.map((id) => redis.get<ProjectData>(`project:${userId}:${id}`)),
-    )
-
-    return NextResponse.json({
-      success: true,
-      data: projects.filter(Boolean).sort((a, b) => b!.createdAt - a!.createdAt),
-    })
+    const projects = await db
+      .select()
+      .from(schema.projects)
+      .orderBy(desc(schema.projects.createdAt))
+    return NextResponse.json({ success: true, data: projects })
   } catch (err) {
     console.error('GET /api/projects:', err instanceof Error ? err.message : err)
     return NextResponse.json({ success: false, error: 'Internal server error' }, { status: 500 })
   }
 }
 
-// POST /api/projects — create new project
 export async function POST(request: NextRequest): Promise<NextResponse<ApiResponse>> {
   try {
-    const { userId } = await auth()
-    if (!userId) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
-
     const parsed = createSchema.safeParse(await request.json() as unknown)
     if (!parsed.success) {
       return NextResponse.json(
@@ -72,19 +39,10 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       )
     }
 
-    const project: ProjectData = {
-      id:        generateId(),
-      userId,
-      createdAt: Date.now(),
-      ...parsed.data,
-    }
-
-    const redis = getRedis()
-    await redis.set(`project:${userId}:${project.id}`, project, { ex: 60 * 60 * 24 * 365 })
-    await redis.sadd(`projects:${userId}`, project.id)
-    // Set TTL on the index set — refreshed on every project creation.
-    // Prevents the set from accumulating forever with expired project IDs.
-    await redis.expire(`projects:${userId}`, 60 * 60 * 24 * 365 * 3)  // 3 years
+    const [project] = await db
+      .insert(schema.projects)
+      .values({ id: generateId(), createdAt: Date.now(), ...parsed.data })
+      .returning()
 
     return NextResponse.json({ success: true, data: project }, { status: 201 })
   } catch (err) {

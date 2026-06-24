@@ -1,0 +1,14 @@
+node_modules
+.next
+data
+.env
+.env.local
+.env.*.local
+drizzle
+*.db
+*.db-shm
+*.db-wal
+.git
+.gitignore
+README.md
+playwright*

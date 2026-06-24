@@ -1,4 +1,5 @@
-import { Redis } from '@upstash/redis'
+import fs   from 'fs'
+import path from 'path'
 import { getAdapter } from '@/lib/adapters'
 import { getBudgetStatus, recordUsage } from '@/lib/budget'
 import { logBudgetModeChange, logPause, logPlay, logStop } from '@/lib/memory/session-log'
@@ -13,57 +14,54 @@ import { detectContradictions }    from './phase2-contradiction'
 import { runPhase2Spec }           from './phase2-spec'
 import { runPhase3Generate }       from './phase3-generate'
 import { runPhase3Review }         from './phase3-review'
-import { runPhase3Consensus } from './phase3-consensus'
+import { runPhase3ReviewerEdit }   from './phase3-reviewer-edit'
+import { runPhase3CoderVerify }    from './phase3-coder-verify'
+import { runPhase3Dialogue }       from './phase3-dialogue'
+import { runPhase3Consensus }      from './phase3-consensus'
 import { consumePendingOverrides } from './human-override'
 import type {
   BudgetMode,
   ConsensusOutput,
   ContextInput,
+  CoderVerification,
+  DialogueSummary,
   PipelineConfig,
   PipelinePhase,
   PipelineSessionState,
+  ReviewEdit,
   ReviewPayload,
   SpecDocument,
   SSEEvent,
+  ThinkingOutput,
 } from '@/types'
 
-// ─── Redis key helpers ────────────────────────────────────────────────────────
+// ─── In-memory stores (global singleton — survives Next.js hot reload) ────────
 
-const STATE_KEY   = (sid: string) => `pipeline:${sid}:state`
-const CONTROL_KEY = (sid: string) => `pipeline:${sid}:control`
-const OUTPUT_KEY  = (uid: string, pid: string) => `project_output:${uid}:${pid}`
+declare global {
+  var __sessionStore:  Map<string, PipelineSessionState> | undefined
+  var __controlStore:  Map<string, 'pause' | 'stop'>    | undefined
+}
 
-const SESSION_TTL = 60 * 60 * 24         // 24 hours
-const OUTPUT_TTL  = 60 * 60 * 24 * 365   // 1 year — survives across devices
+const sessionStore: Map<string, PipelineSessionState> =
+  global.__sessionStore ??= new Map()
 
-const _redis = new Redis({
-  url:   process.env.UPSTASH_REDIS_REST_URL!,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN!,
-})
-function getRedis(): Redis { return _redis }
+const controlStore: Map<string, 'pause' | 'stop'> =
+  global.__controlStore ??= new Map()
 
-// ─── Session state — Redis CRUD ───────────────────────────────────────────────
+// ─── Session state CRUD ───────────────────────────────────────────────────────
 
 export async function getSessionState(sessionId: string): Promise<PipelineSessionState | null> {
-  const redis = getRedis()
-  const raw   = await redis.get<string>(STATE_KEY(sessionId))
-  if (!raw) return null
-  try {
-    return typeof raw === 'string' ? JSON.parse(raw) as PipelineSessionState : raw as PipelineSessionState
-  } catch {
-    return null
-  }
+  return sessionStore.get(sessionId) ?? null
 }
 
 export async function saveSessionState(state: PipelineSessionState): Promise<void> {
-  const redis = getRedis()
   state.updatedAt = Date.now()
-  await redis.setex(STATE_KEY(state.sessionId), SESSION_TTL, JSON.stringify(state))
+  sessionStore.set(state.sessionId, state)
 }
 
-// ─── Project-level output (long-lived, cross-device) ─────────────────────────
-// Consensus output is stored here (1 year TTL) so any device can restore it.
-// This is separate from the session state (24h TTL).
+// ─── Project output (filesystem — survives restarts + Docker volume) ──────────
+
+const DATA_DIR = process.env.DATA_DIR ?? './data'
 
 export interface StoredProjectOutput {
   output:    ConsensusOutput
@@ -73,56 +71,49 @@ export interface StoredProjectOutput {
 }
 
 export async function saveProjectOutput(
-  userId:    string,
+  _userId:   string,
   projectId: string,
   output:    ConsensusOutput,
   spec:      SpecDocument | null,
   sessionId: string,
 ): Promise<void> {
-  const redis = getRedis()
+  const dir  = path.join(DATA_DIR, 'projects', projectId)
+  fs.mkdirSync(dir, { recursive: true })
   const stored: StoredProjectOutput = { output, spec, savedAt: Date.now(), sessionId }
-  await redis.set(OUTPUT_KEY(userId, projectId), JSON.stringify(stored), { ex: OUTPUT_TTL })
+  fs.writeFileSync(path.join(dir, 'output.json'), JSON.stringify(stored, null, 2))
 }
 
 export async function getProjectOutput(
-  userId:    string,
+  _userId:   string,
   projectId: string,
 ): Promise<StoredProjectOutput | null> {
-  const redis = getRedis()
-  const raw   = await redis.get<string>(OUTPUT_KEY(userId, projectId))
-  if (!raw) return null
+  const file = path.join(DATA_DIR, 'projects', projectId, 'output.json')
   try {
-    return typeof raw === 'string' ? JSON.parse(raw) as StoredProjectOutput : raw as StoredProjectOutput
+    if (!fs.existsSync(file)) return null
+    return JSON.parse(fs.readFileSync(file, 'utf8')) as StoredProjectOutput
   } catch {
     return null
   }
 }
 
-// ─── Control signals — pause / stop ──────────────────────────────────────────
+// ─── Control signals (pause / stop) ──────────────────────────────────────────
 
 export async function setControlSignal(
   sessionId: string,
   signal: 'pause' | 'stop' | null,
 ): Promise<void> {
-  const redis = getRedis()
-  if (signal === null) {
-    await redis.del(CONTROL_KEY(sessionId))
-  } else {
-    await redis.setex(CONTROL_KEY(sessionId), SESSION_TTL, signal)
-  }
+  if (signal === null) controlStore.delete(sessionId)
+  else controlStore.set(sessionId, signal)
 }
 
 export async function getControlSignal(sessionId: string): Promise<'pause' | 'stop' | null> {
-  const redis = getRedis()
-  const val   = await redis.get<string>(CONTROL_KEY(sessionId))
-  if (val === 'pause' || val === 'stop') return val
-  return null
+  return controlStore.get(sessionId) ?? null
 }
 
 // ─── Pipeline session factory ─────────────────────────────────────────────────
 
 export interface StartPipelineParams {
-  userId:          string           // Clerk user ID — required for budget tracking
+  userId:          string
   projectId:       string
   taskDescription: string
   config:          PipelineConfig
@@ -164,7 +155,7 @@ export async function pauseSession(sessionId: string): Promise<void> {
   const state = await getSessionState(sessionId)
   if (!state) return
   await logPause(state.projectId, sessionId, state.phase)
-  state.previousPhase = state.phase   // remember where we paused
+  state.previousPhase = state.phase
   state.phase = 'paused'
   await saveSessionState(state)
 }
@@ -174,7 +165,6 @@ export async function playSession(sessionId: string): Promise<void> {
   const state = await getSessionState(sessionId)
   if (!state) return
   await logPlay(state.projectId, sessionId, state.phase)
-  // Resume from wherever we left off — caller will invoke runPipeline()
 }
 
 export async function stopSession(sessionId: string): Promise<void> {
@@ -232,23 +222,16 @@ export async function resolveConflict(
   }
   state.pendingHumanOverrides.push(overrideMessage)
   state.phase = 'phase3_generating'
-  state.round = 1  // Reset round — human decision anchors both models
-  state.lastReview = undefined   // clear stale review — new generation starts fresh
+  state.round = 1
+  state.lastReview = undefined
   await saveSessionState(state)
 }
 
 // ─── Alignment skip heuristic ─────────────────────────────────────────────────
-// Skip the 2-round alignment API calls when thinking outputs already show agreement.
-// The reviewer's code-review is the real quality gate — alignment is pre-flight
-// conflict detection only.
-
-import type { ThinkingOutput } from '@/types'
 
 function canSkipAlignment(primary: ThinkingOutput, reviewer: ThinkingOutput): boolean {
   if (primary.understood_as === 'Model returned unparseable output') return false
   if (reviewer.understood_as === 'Model returned unparseable output') return false
-  // If models raised 3+ required questions across both outputs, there's genuine
-  // architectural ambiguity that benefits from alignment
   const reqCount = [...primary.questions, ...reviewer.questions].filter(q => q.is_required).length
   if (reqCount > 2) return false
   return true
@@ -264,23 +247,18 @@ async function checkControl(
 }
 
 // ─── Emit helper ─────────────────────────────────────────────────────────────
-// Always publishes to Redis (for state persistence + pause/stop detection).
-// If externalEmit is provided (SSE stream path), also calls it directly for
-// zero-latency delivery without polling.
 
 function makeEmit(
   sessionId:     string,
   externalEmit?: (event: SSEEvent) => void,
 ): (event: SSEEvent) => void {
-  // Emit directly via SSE — no Redis queue needed (consumeEvents was never called).
-  void sessionId  // kept for potential future use
+  void sessionId
   return (event: SSEEvent) => {
     externalEmit?.(event)
   }
 }
 
 // ─── Budget recording (fully fire-and-forget) ────────────────────────────────
-// Never await budget operations — they must never block the pipeline between phases.
 
 function recordAndRefreshBudget(
   state:    PipelineSessionState,
@@ -293,12 +271,10 @@ function recordAndRefreshBudget(
   recordUsage(state.userId, state.sessionId, provider, modelId, tokensIn, tokensOut)
     .catch(err => console.error('[budget] recordUsage failed:', err))
 
-  // Refresh budget mode asynchronously — never awaited
   getBudgetStatus(state.userId, state.sessionId)
     .then(budget => {
       if (budget.mode !== state.budgetMode) {
         state.budgetMode = budget.mode
-        // Persist the updated mode — transition() already ran with the old value
         saveSessionState(state).catch(() => {})
         logBudgetModeChange(state.projectId, state.sessionId, state.phase, budget.mode).catch(() => {})
         emit({ type: 'phase_change', phase: state.phase })
@@ -320,20 +296,6 @@ async function transition(
 
 // ─── Main pipeline runner (resumable state machine) ──────────────────────────
 
-/**
- * Runs the pipeline from wherever the session state left off.
- *
- * This function is re-entrant: it reads the current phase from Redis and
- * picks up execution from there. It returns when:
- *   - It reaches a human-input gate (questions, spec confirm, conflict)
- *   - The pipeline completes or is stopped
- *   - An error occurs
- *
- * Phases that wait for human input:
- *   phase2_answering    → returns; caller resumes via submitAnswers() + runPipeline()
- *   phase2_spec_confirm → returns; caller resumes via confirmSpec() + runPipeline()
- *   conflict_escalated  → returns; caller resumes via resolveConflict() + runPipeline()
- */
 export async function runPipeline(
   sessionId:     string,
   externalEmit?: (event: SSEEvent) => void,
@@ -341,9 +303,6 @@ export async function runPipeline(
   let state = await getSessionState(sessionId)
   if (!state) throw new Error(`Session not found: ${sessionId}`)
 
-  // ─── Resume from pause ────────────────────────────────────────────────────────
-  // playSession clears the control signal but doesn't change the phase.
-  // Restore the pre-pause phase so the pipeline can continue from where it left off.
   if (state.phase === 'paused') {
     const resumePhase = state.previousPhase ?? 'phase3_generating'
     state.previousPhase = undefined
@@ -357,8 +316,6 @@ export async function runPipeline(
   const primary  = getAdapter(config.primaryProvider,  config.primaryModelId,  config.primaryApiKey)
   const reviewer = getAdapter(config.reviewerProvider, config.reviewerModelId, config.reviewerApiKey)
 
-  // ─── Helper: check control signal between every phase ──────────────────────
-
   const maybeStop = async (): Promise<boolean> => {
     const signal = await checkControl(sessionId)
     if (signal === 'stop') {
@@ -366,7 +323,7 @@ export async function runPipeline(
       return true
     }
     if (signal === 'pause') {
-      state!.previousPhase = state!.phase   // remember where we paused
+      state!.previousPhase = state!.phase
       state = await transition(state!, 'paused')
       return true
     }
@@ -384,7 +341,6 @@ export async function runPipeline(
         primary, reviewer, emit, state.contextText,
       )
       state.thinkingOutputs = result
-      // Record budget for both models' thinking calls
       const taskTokens = estimateTokens(state.taskDescription)
       recordAndRefreshBudget(state, config.primaryProvider, config.primaryModelId,
         taskTokens, result.primary.tokens_used, emit)
@@ -406,8 +362,6 @@ export async function runPipeline(
       const { primary: pThink, reviewer: rThink } = state.thinkingOutputs!
 
       if (canSkipAlignment(pThink, rThink)) {
-        // Fast path: merge thinking outputs directly — no model API calls.
-        // Saves 20-60s. Genuine conflicts surface during reviewer code review.
         state.alignmentResult = {
           messages: [],
           agreed_questions:              [...pThink.questions, ...rThink.questions],
@@ -418,7 +372,6 @@ export async function runPipeline(
           total_tokens:                  0,
         }
       } else {
-        // Full alignment — needed when models raised 3+ required questions
         const result = await runPhase1_5Alignment(
           projectId, sessionId, state.taskDescription,
           pThink, rThink, primary, reviewer, emit, state.contextText,
@@ -447,9 +400,6 @@ export async function runPipeline(
       )
       state.questions = questions
 
-      // Auto-select recommended options for non-required questions.
-      // This reduces Q&A friction — users only answer questions where the
-      // model had no clear recommendation or the question is architecturally required.
       const autoAnswers: Record<string, string> = { ...(state.userAnswers ?? {}) }
       for (const q of questions) {
         if (!q.is_required && q.recommended_option_id && !autoAnswers[q.id]) {
@@ -461,18 +411,14 @@ export async function runPipeline(
       const hasUnansweredRequired = questions.some(q => q.is_required && !autoAnswers[q.id])
       if (hasUnansweredRequired) {
         state = await transition(state, 'phase2_answering')
-        return  // ← Human input gate: wait for required answers only
+        return
       }
-      // All questions resolved — skip Q&A gate entirely
       state = await transition(state, 'phase2_contradictions')
-      // falls through to phase2_contradictions block below
     } catch (err) {
       await handleError(state, err, emit)
       return
     }
   }
-
-  // ─── Gate: waiting for answers ────────────────────────────────────────────
 
   if (state.phase === 'phase2_answering') return
 
@@ -484,15 +430,11 @@ export async function runPipeline(
     const contradictions = detectContradictions(state.questions!, state.userAnswers!)
     state.contradictions = contradictions
 
-    // Emit all contradictions so the UI can surface them — but do NOT block.
-    // Contradictions become edge cases in the spec, and the human resolves
-    // any genuine conflict when they review and confirm the spec.
     for (const c of contradictions) {
       emit({ type: 'contradiction', contradiction: c })
     }
 
     state = await transition(state, 'phase2_spec')
-    // falls through to phase2_spec block below
   }
 
   // ─── Phase 2: Spec generation ─────────────────────────────────────────────
@@ -514,28 +456,25 @@ export async function runPipeline(
 
       state.spec = spec
       state = await transition(state, 'phase2_spec_confirm')
-      return  // ← Human input gate: wait for spec confirmation via confirmSpec()
+      return
     } catch (err) {
       await handleError(state, err, emit)
       return
     }
   }
 
-  // ─── Gate: waiting for spec confirmation ─────────────────────────────────
-
   if (state.phase === 'phase2_spec_confirm') return
 
-  // ─── Phase 3 loop: Generate → Review → Consensus ────────────────────────
-  // Split across two Vercel function invocations per round to avoid timeout:
-  //   Invocation A (phase3_generating): stream tokens + self-check → returns
-  //   Invocation B (phase3_reviewing):  review + consensus → loops or done
-  // The client auto-reconnects between invocations (see usePipeline AUTO_RECONNECT_PHASES).
+  // ─── Phase 3 loop: Generate → Review → ReviewerEdit → CoderVerify → Dialogue ─
 
   while (
-    state.phase === 'phase3_generating' ||
-    state.phase === 'phase3_reviewing'  ||
-    state.phase === 'phase3_consensus'  ||
-    state.phase === 'phase3_self_check'
+    state.phase === 'phase3_generating'    ||
+    state.phase === 'phase3_self_check'    ||
+    state.phase === 'phase3_reviewing'     ||
+    state.phase === 'phase3_reviewer_edit' ||
+    state.phase === 'phase3_coder_verify'  ||
+    state.phase === 'phase3_dialogue'      ||
+    state.phase === 'phase3_consensus'
   ) {
     if (await maybeStop()) return
 
@@ -543,26 +482,28 @@ export async function runPipeline(
     state.pendingHumanOverrides = []
     const ctx = buildContext(state, overrideText)
 
-    // ── Invocation A: Generate + Self-Check ──────────────────────────────────
+    // ── Generate + Self-Check ────────────────────────────────────────────────
 
     if (state.phase === 'phase3_generating' || state.phase === 'phase3_self_check') {
       try {
         const genResult = await runPhase3Generate(
           projectId, sessionId, state.round, ctx, primary, emit,
-          state.lastReview && !state.lastReview.consensus ? state.lastReview : undefined,
+          undefined,
           state.generatedCode,
         )
-        state.generatedCode   = genResult.code
-        state.selfCheckOutput = genResult.selfCheckOutput
-        // Estimate full prompt size: spec + task + history + criteria + edge cases
+        state.generatedCode      = genResult.code
+        state.selfCheckOutput    = genResult.selfCheckOutput
+        state.reviewerEdit       = undefined
+        state.mergedCode         = undefined
+        state.coderVerification  = undefined
+        state.dialogue           = undefined
+
         const genPromptTokens = estimateTokens(ctx.taskDescription)
           + estimateTokens(JSON.stringify(ctx.spec))
           + estimateTokens(ctx.history.map(m => m.content).join(' '))
         recordAndRefreshBudget(state, config.primaryProvider, config.primaryModelId,
           genPromptTokens, genResult.tokensOut, emit)
         state = await transition(state, 'phase3_reviewing')
-        // Return so the SSE stream closes. The client sees phase3_reviewing and
-        // immediately reconnects. The new invocation picks up at phase3_reviewing below.
         return
       } catch (err) {
         await handleError(state, err, emit)
@@ -572,8 +513,7 @@ export async function runPipeline(
 
     if (await maybeStop()) return
 
-    // ── Invocation B: Review ─────────────────────────────────────────────────
-    // state.generatedCode was saved to Redis by Invocation A.
+    // ── Review ───────────────────────────────────────────────────────────────
 
     if (state.phase === 'phase3_reviewing') {
       const code = state.generatedCode!
@@ -588,27 +528,25 @@ export async function runPipeline(
         const now = Date.now()
         state.conversationHistory = [
           ...state.conversationHistory,
+          { role: 'assistant' as const, content: `[Round ${state.round} code — ${code.length} chars]`, timestamp: now },
           {
-            role:      'assistant' as const,
-            content:   `[Round ${state.round} generated code — ${code.length} chars]`,
-            timestamp: now,
-          },
-          {
-            role:      'user' as const,
-            content:   `[Round ${state.round} reviewer feedback] ${review.reasoning} Flags: ${
+            role: 'user' as const,
+            content: `[Round ${state.round} review] ${review.reasoning} Flags: ${
               review.flags.map(f => `[${f.severity}] ${f.description}`).join(' | ')
             }`,
             timestamp: now,
           },
         ]
 
-        // Reviewer sees: code + spec + previous review flags
-        const reviewPromptTokens = estimateTokens(code)
-          + estimateTokens(JSON.stringify(ctx.spec))
-          + (state.lastReview ? estimateTokens(JSON.stringify(state.lastReview)) : 0)
+        const reviewPromptTokens = estimateTokens(code) + estimateTokens(JSON.stringify(ctx.spec))
         recordAndRefreshBudget(state, config.reviewerProvider, config.reviewerModelId,
           reviewPromptTokens, estimateTokens(JSON.stringify(review)), emit)
-        state = await transition(state, 'phase3_consensus')
+
+        if (review.consensus) {
+          state = await transition(state, 'phase3_consensus')
+        } else {
+          state = await transition(state, 'phase3_reviewer_edit')
+        }
       } catch (err) {
         await handleError(state, err, emit)
         return
@@ -617,7 +555,84 @@ export async function runPipeline(
 
     if (await maybeStop()) return
 
-    // ── Consensus ────────────────────────────────────────────────────────────
+    // ── Reviewer Edit ─────────────────────────────────────────────────────────
+
+    if (state.phase === 'phase3_reviewer_edit') {
+      const code   = state.generatedCode!
+      const review = state.lastReview!
+      try {
+        const { edit, mergedCode } = await runPhase3ReviewerEdit(
+          projectId, sessionId, code, review, ctx, reviewer, state.round, emit,
+        )
+        state.reviewerEdit = edit
+        state.mergedCode   = mergedCode
+        state = await transition(state, 'phase3_coder_verify')
+      } catch (err) {
+        await handleError(state, err, emit)
+        return
+      }
+    }
+
+    if (await maybeStop()) return
+
+    // ── Coder Verify ──────────────────────────────────────────────────────────
+
+    if (state.phase === 'phase3_coder_verify') {
+      const code       = state.generatedCode!
+      const edit       = state.reviewerEdit!
+      const mergedCode = state.mergedCode!
+      const review     = state.lastReview!
+      try {
+        const verification = await runPhase3CoderVerify(
+          projectId, sessionId, code, edit, mergedCode, review, ctx, primary, state.round, emit,
+        )
+        state.coderVerification = verification
+
+        if (verification.agrees) {
+          state.generatedCode = mergedCode
+          state = await transition(state, 'phase3_consensus')
+        } else {
+          state = await transition(state, 'phase3_dialogue')
+        }
+      } catch (err) {
+        await handleError(state, err, emit)
+        return
+      }
+    }
+
+    if (await maybeStop()) return
+
+    // ── Model Dialogue ────────────────────────────────────────────────────────
+
+    if (state.phase === 'phase3_dialogue') {
+      const code         = state.generatedCode!
+      const mergedCode   = state.mergedCode!
+      const edit         = state.reviewerEdit!
+      const verification = state.coderVerification!
+      const review       = state.lastReview!
+      try {
+        const dialogue = await runPhase3Dialogue(
+          projectId, sessionId, code, mergedCode, edit, verification,
+          review, ctx, primary, reviewer, state.round, emit,
+        )
+        state.dialogue = dialogue
+
+        if (dialogue.resolved) {
+          state.generatedCode = mergedCode
+          state = await transition(state, 'phase3_consensus')
+        } else {
+          state = await transition(state, 'conflict_escalated')
+          return
+        }
+      } catch (err) {
+        await handleError(state, err, emit)
+        return
+      }
+    }
+
+    if (await maybeStop()) return
+
+    // ── Consensus ─────────────────────────────────────────────────────────────
 
     if (state.phase === 'phase3_consensus') {
       const code   = state.generatedCode!
@@ -625,8 +640,9 @@ export async function runPipeline(
 
       let decision: Awaited<ReturnType<typeof runPhase3Consensus>>
       try {
+        const syntheticReview: ReviewPayload = { ...review, consensus: true }
         decision = await runPhase3Consensus(
-          projectId, sessionId, code, review, ctx, emit,
+          projectId, sessionId, code, syntheticReview, ctx, emit,
         )
       } catch (err) {
         await handleError(state, err, emit)
@@ -641,19 +657,10 @@ export async function runPipeline(
         return
       }
 
-      if (decision.escalate) {
-        state = await transition(state, 'conflict_escalated')
-        return
-      }
-
-      // No consensus → next round generates a patch; loop back
-      state.round += 1
-      state = await transition(state, 'phase3_generating')
-      // While loop continues; generate block runs next iteration (returns again)
+      state = await transition(state, 'conflict_escalated')
+      return
     }
   }
-
-  // ─── Gate: waiting for conflict resolution ────────────────────────────────
 
   if (state.phase === 'conflict_escalated') return
 }
@@ -668,7 +675,6 @@ async function handleError(
   const message = err instanceof Error ? err.message : String(err)
   console.error(`[orchestrator] Error in phase ${state.phase}:`, message)
 
-  // Report to Sentry with full pipeline context
   capturePipelineError(err, {
     sessionId: state.sessionId,
     projectId: state.projectId,
@@ -690,7 +696,7 @@ function buildContext(
   state:        PipelineSessionState,
   overrideText: string | null,
 ) {
-  const base = {
+  return {
     projectId:       state.projectId,
     sessionId:       state.sessionId,
     spec:            state.spec!,
@@ -707,12 +713,7 @@ function buildContext(
     humanOverrides:  overrideText ? [overrideText] : [],
     taskDescription: state.taskDescription,
   }
-
-  return base
 }
 
-// ─── Utility: get session for API routes ─────────────────────────────────────
-
 export { getAdapter }
-
 export type { PipelineSessionState, PipelineConfig }

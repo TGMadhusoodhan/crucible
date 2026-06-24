@@ -8,12 +8,11 @@ import { AlignmentPanel }   from './AlignmentPanel'
 import { QuestionsPanel }   from './QuestionsPanel'
 import { SpecPanel }        from './SpecPanel'
 import { GeneratingPanel }  from './GeneratingPanel'
+import { DialoguePanel }    from './DialoguePanel'
 import { ConflictPanel }    from './ConflictPanel'
 import { CompletePanel }    from './CompletePanel'
 import { cn } from '@/lib/utils'
 
-// Phases where we show the thinking panel as a left sidebar alongside the main content.
-// This prevents the thinking output from flashing away when the pipeline auto-proceeds.
 const THINKING_SIDEBAR_PHASES = new Set([
   'phase1_5_alignment',
   'phase2_questions',
@@ -23,15 +22,21 @@ const THINKING_SIDEBAR_PHASES = new Set([
   'phase2_spec_confirm',
 ])
 
+const PHASE3_LABELS: Partial<Record<string, string>> = {
+  phase3_reviewer_edit: 'Reviewer editing…',
+  phase3_coder_verify:  'Coder verifying reviewer\'s changes…',
+}
+
 // ─── Phase progress strip ─────────────────────────────────────────────────────
 
 const PHASES = [
-  { label: 'Think',   phases: ['phase1_thinking'] },
-  { label: 'Align',   phases: ['phase1_5_alignment'] },
-  { label: 'Q&A',     phases: ['phase2_questions', 'phase2_answering', 'phase2_contradictions'] },
-  { label: 'Spec',    phases: ['phase2_spec', 'phase2_spec_confirm'] },
-  { label: 'Generate',phases: ['phase3_generating', 'phase3_self_check', 'phase3_reviewing', 'phase3_consensus'] },
-  { label: 'Done',    phases: ['complete'] },
+  { label: 'Think',    phases: ['phase1_thinking'] },
+  { label: 'Align',    phases: ['phase1_5_alignment'] },
+  { label: 'Q&A',      phases: ['phase2_questions', 'phase2_answering', 'phase2_contradictions'] },
+  { label: 'Spec',     phases: ['phase2_spec', 'phase2_spec_confirm'] },
+  { label: 'Generate', phases: ['phase3_generating', 'phase3_self_check', 'phase3_reviewing'] },
+  { label: 'Verify',   phases: ['phase3_reviewer_edit', 'phase3_coder_verify', 'phase3_dialogue', 'phase3_consensus'] },
+  { label: 'Done',     phases: ['complete'] },
 ]
 
 function ProgressStrip() {
@@ -179,8 +184,13 @@ export function PipelineView() {
       case 'phase3_generating':
       case 'phase3_self_check':
       case 'phase3_reviewing':
+      case 'phase3_reviewer_edit':
+      case 'phase3_coder_verify':
       case 'phase3_consensus':
-        return <GeneratingPanel />
+        return <GeneratingPanel label={PHASE3_LABELS[phase]} />
+
+      case 'phase3_dialogue':
+        return <DialoguePanel />
 
       case 'conflict_escalated':
         return <ConflictPanel />

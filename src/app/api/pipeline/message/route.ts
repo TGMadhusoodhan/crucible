@@ -1,4 +1,3 @@
-import { auth } from '@clerk/nextjs/server'
 import { NextResponse, type NextRequest } from 'next/server'
 import { z } from 'zod'
 import {
@@ -9,8 +8,6 @@ import {
 } from '@/lib/pipeline/orchestrator'
 import { captureApiError } from '@/lib/sentry'
 import type { ApiResponse } from '@/types'
-
-// ─── Request schemas ──────────────────────────────────────────────────────────
 
 const answersSchema = z.object({
   type:      z.literal('answers'),
@@ -35,30 +32,8 @@ const messageSchema = z.discriminatedUnion('type', [
   resolveConflictSchema,
 ])
 
-// ─── Auth + session guard ─────────────────────────────────────────────────────
-
-async function guardSession(clerkUserId: string, sessionId: string) {
-  const state = await getSessionState(sessionId)
-  if (!state) return { error: 'Session not found', status: 404, state: null }
-  if (state.userId !== clerkUserId) return { error: 'Forbidden', status: 403, state: null }
-  return { error: null, status: 200, state }
-}
-
-// POST /api/pipeline/message
-// Three sub-actions unified under one route:
-//   type='answers'          — submit question answers (phase2_answering → phase2_contradictions)
-//   type='confirm_spec'     — approve the spec (phase2_spec_confirm → phase3_generating)
-//   type='resolve_conflict' — human resolves model conflict (conflict_escalated → phase3_generating)
-//
-// After each action the session phase advances in Redis.
-// The client then reconnects to GET /api/pipeline/stream to continue execution.
 export async function POST(request: NextRequest): Promise<NextResponse<ApiResponse>> {
   try {
-    const { userId: clerkUserId } = await auth()
-    if (!clerkUserId) {
-      return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
-    }
-
     const body = await request.json() as unknown
     const parsed = messageSchema.safeParse(body)
     if (!parsed.success) {
@@ -69,10 +44,8 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     }
 
     const msg = parsed.data
-    const { error, status, state } = await guardSession(clerkUserId, msg.sessionId)
-    if (error || !state) {
-      return NextResponse.json({ success: false, error: error! }, { status })
-    }
+    const state = await getSessionState(msg.sessionId)
+    if (!state) return NextResponse.json({ success: false, error: 'Session not found' }, { status: 404 })
 
     switch (msg.type) {
       case 'answers': {

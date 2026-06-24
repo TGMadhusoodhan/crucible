@@ -2,8 +2,11 @@ import Anthropic from '@anthropic-ai/sdk'
 import type { MessageParam } from '@anthropic-ai/sdk/resources/messages/messages'
 import type {
   AlignmentMessage,
+  CoderVerification,
+  DialogueSummary,
   PipelineContext,
   Provider,
+  ReviewEdit,
   ReviewPayload,
   SelfCheckOutput,
   SpecDocument,
@@ -11,20 +14,31 @@ import type {
 } from '@/types'
 import {
   ALIGNMENT_SYSTEM_PROMPT,
+  CODER_DIALOGUE_SYSTEM_PROMPT,
+  CODER_VERIFY_SYSTEM_PROMPT,
   GENERATION_SYSTEM_PROMPT,
+  REVIEWER_DIALOGUE_SYSTEM_PROMPT,
+  REVIEWER_EDIT_SYSTEM_PROMPT,
   REVIEWER_SYSTEM_PROMPT,
   SELF_CHECK_SYSTEM_PROMPT,
   THINKING_SYSTEM_PROMPT,
   BaseAdapter,
   buildAlignmentPrompt,
+  buildCoderDialoguePrompt,
+  buildCoderVerifyPrompt,
   buildGenerationPrompt,
   buildReviewPrompt,
+  buildReviewerDialoguePrompt,
+  buildReviewerEditPrompt,
   buildSelfCheckPrompt,
   buildThinkingConversionPrompt,
   buildThinkingPrompt,
   isUnparseableThinkingOutput,
+  parseCoderVerification,
   parseJSON,
+  parseReviewEdit,
   parseReviewPayload,
+  parseReviewerDialogueResponse,
   parseSelfCheckOutput,
   parseThinkingOutput,
 } from './base'
@@ -216,6 +230,81 @@ export class ClaudeAdapter extends BaseAdapter {
       return parseReviewPayload(text, round)
     } catch (err) {
       throw wrapErr(err, 'review', this.modelId)
+    }
+  }
+
+  // ─── Phase 3b: Reviewer Edit ────────────────────────────────────────────────
+
+  async reviewerEdit(code: string, spec: SpecDocument, review: ReviewPayload, round: number): Promise<ReviewEdit> {
+    const prompt = buildReviewerEditPrompt(code, spec, review)
+    try {
+      const res = await this.client.messages.create({
+        model:      this.modelId,
+        max_tokens: 8192,
+        system:     REVIEWER_EDIT_SYSTEM_PROMPT,
+        messages:   [{ role: 'user', content: prompt }],
+      })
+      const block = res.content[0]
+      const text  = block?.type === 'text' ? block.text : ''
+      return parseReviewEdit(text)
+    } catch (err) {
+      throw wrapErr(err, `reviewerEdit:round${round}`, this.modelId)
+    }
+  }
+
+  // ─── Phase 3b: Coder Verify ─────────────────────────────────────────────────
+
+  async coderVerify(originalCode: string, edit: ReviewEdit, mergedCode: string, review: ReviewPayload): Promise<CoderVerification> {
+    const prompt = buildCoderVerifyPrompt(originalCode, edit, mergedCode, review)
+    try {
+      const res = await this.client.messages.create({
+        model:      this.modelId,
+        max_tokens: 4096,
+        system:     CODER_VERIFY_SYSTEM_PROMPT,
+        messages:   [{ role: 'user', content: prompt }],
+      })
+      const block = res.content[0]
+      const text  = block?.type === 'text' ? block.text : ''
+      return parseCoderVerification(text)
+    } catch (err) {
+      throw wrapErr(err, 'coderVerify', this.modelId)
+    }
+  }
+
+  // ─── Phase 3b: Coder Dialogue ───────────────────────────────────────────────
+
+  async coderDialogue(code: string, dialogue: DialogueSummary, verification: CoderVerification): Promise<string> {
+    const prompt = buildCoderDialoguePrompt(code, dialogue, verification)
+    try {
+      const res = await this.client.messages.create({
+        model:      this.modelId,
+        max_tokens: 512,
+        system:     CODER_DIALOGUE_SYSTEM_PROMPT,
+        messages:   [{ role: 'user', content: prompt }],
+      })
+      const block = res.content[0]
+      return block?.type === 'text' ? block.text.trim() : 'No response'
+    } catch (err) {
+      throw wrapErr(err, 'coderDialogue', this.modelId)
+    }
+  }
+
+  // ─── Phase 3b: Reviewer Dialogue ────────────────────────────────────────────
+
+  async reviewerDialogue(code: string, dialogue: DialogueSummary, review: ReviewPayload): Promise<{ response: string; resolved: boolean }> {
+    const prompt = buildReviewerDialoguePrompt(code, dialogue, review)
+    try {
+      const res = await this.client.messages.create({
+        model:      this.modelId,
+        max_tokens: 512,
+        system:     REVIEWER_DIALOGUE_SYSTEM_PROMPT,
+        messages:   [{ role: 'user', content: prompt }],
+      })
+      const block = res.content[0]
+      const text  = block?.type === 'text' ? block.text : ''
+      return parseReviewerDialogueResponse(text)
+    } catch (err) {
+      throw wrapErr(err, 'reviewerDialogue', this.modelId)
     }
   }
 }
