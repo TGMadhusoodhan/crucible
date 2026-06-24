@@ -7,6 +7,7 @@ import {
   confirmSpec,
   resolveConflict,
 } from '@/lib/pipeline/orchestrator'
+import { captureApiError } from '@/lib/sentry'
 import type { ApiResponse } from '@/types'
 
 // ─── Request schemas ──────────────────────────────────────────────────────────
@@ -109,6 +110,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     }
   } catch (err) {
     console.error('POST /api/pipeline/message:', err instanceof Error ? err.message : err)
+    captureApiError(err, 'POST /api/pipeline/message')
     return NextResponse.json({ success: false, error: 'Internal server error' }, { status: 500 })
   }
 }

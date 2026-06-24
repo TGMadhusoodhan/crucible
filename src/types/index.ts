@@ -350,6 +350,7 @@ export interface PipelineSessionState {
   projectId: string
   userId: string                       // Clerk user ID — required for budget tracking
   phase: PipelinePhase
+  previousPhase?: PipelinePhase        // saved before transitioning to 'paused'
   config: PipelineConfig
   round: number                        // generation round (1–3 before escalation)
   selfCheckPass: number                // 0 | 1 | 2 — enforced ≤ 2

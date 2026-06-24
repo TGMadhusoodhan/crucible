@@ -5,7 +5,7 @@ import { usePipelineState } from '@/store'
 import { saveOutputToFolder, pickProjectFolder, isFileSystemAccessSupported } from '@/lib/localfs'
 
 export function CompletePanel() {
-  const { output, lastReview, round, spec, project } = usePipelineState()
+  const { output, lastReview, spec, project } = usePipelineState()
   const [copied,     setCopied]     = useState(false)
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error' | 'no-folder'>('idle')
   const [folderName, setFolderName] = useState<string | null>(null)
@@ -67,7 +67,7 @@ export function CompletePanel() {
             <h2 className="text-sm font-medium text-zinc-200">Consensus Reached</h2>
           </div>
           <p className="text-xs text-zinc-600">
-            Validated in {round} round{round !== 1 ? 's' : ''} · {output.code.length.toLocaleString()} chars
+            Validated in {output.review.round} round{output.review.round !== 1 ? 's' : ''} · {output.code.length.toLocaleString()} chars
           </p>
         </div>
 

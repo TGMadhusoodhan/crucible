@@ -14,7 +14,7 @@ const postSchema = z.object({
 })
 
 // Validates a key with the lightest possible call to each provider
-async function validateApiKey(provider: Provider, apiKey: string): Promise<boolean> {
+async function validateApiKey(provider: Provider, apiKey: string): Promise<{ valid: boolean; networkError?: string }> {
   const configs: Record<Provider, { url: string; headers: Record<string, string> }> = {
     anthropic: {
       url: 'https://api.anthropic.com/v1/models',
@@ -56,9 +56,16 @@ async function validateApiKey(provider: Provider, apiKey: string): Promise<boole
       headers,
       signal: AbortSignal.timeout(10_000),
     })
-    return res.ok
-  } catch {
-    return false
+    return { valid: res.ok }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    const isTimeout = msg.toLowerCase().includes('timeout') || msg.includes('TimeoutError')
+    return {
+      valid: false,
+      networkError: isTimeout
+        ? `${provider} API timed out. The key may be valid — try again.`
+        : `Could not reach ${provider}. Check your network connection.`,
+    }
   }
 }
 
@@ -144,11 +151,14 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
 
     const { provider, apiKey } = parsed.data
 
-    const isValid = await validateApiKey(provider, apiKey)
+    const { valid: isValid, networkError } = await validateApiKey(provider, apiKey)
     if (!isValid) {
       return NextResponse.json(
-        { success: false, error: `API key rejected by ${provider}. Check the key and try again.` },
-        { status: 422 },
+        {
+          success: false,
+          error: networkError ?? `API key rejected by ${provider}. Check the key and try again.`,
+        },
+        { status: networkError ? 502 : 422 },
       )
     }
 

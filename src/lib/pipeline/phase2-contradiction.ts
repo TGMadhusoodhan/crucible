@@ -43,6 +43,12 @@ function matchesRule(labelA: string, labelB: string, rule: IncompatibilityRule):
          (endorses(labelA, rule.termB) && endorses(labelB, rule.termA))
 }
 
+/** Returns an option ID that is NOT the currently chosen one — the least-bad alternative. */
+function alternativeOptionId(question: Question, currentOptionId: string): string {
+  const alt = question.options.find(o => o.id !== currentOptionId)
+  return alt?.id ?? currentOptionId
+}
+
 function buildResolutionOptions(
   qA: Question, answerA: string,
   qB: Question, answerB: string,
@@ -50,13 +56,13 @@ function buildResolutionOptions(
   return [
     {
       id:          generateId(),
-      description: `Keep "${optionLabelFor(qA, answerA)}" — change "${qB.text}" to match`,
-      changes:     { [qB.id]: qB.options[0]?.id ?? answerB },
+      description: `Keep "${optionLabelFor(qA, answerA)}" — change "${qB.text}" to a compatible option`,
+      changes:     { [qB.id]: alternativeOptionId(qB, answerB) },
     },
     {
       id:          generateId(),
-      description: `Keep "${optionLabelFor(qB, answerB)}" — change "${qA.text}" to match`,
-      changes:     { [qA.id]: qA.options[0]?.id ?? answerA },
+      description: `Keep "${optionLabelFor(qB, answerB)}" — change "${qA.text}" to a compatible option`,
+      changes:     { [qA.id]: alternativeOptionId(qA, answerA) },
     },
   ]
 }

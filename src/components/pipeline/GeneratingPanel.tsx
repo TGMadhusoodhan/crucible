@@ -22,11 +22,16 @@ function PhaseStep({ label, active, done }: { label: string; active: boolean; do
 
 export function GeneratingPanel() {
   const { streamingCode, selfCheckOutput, phase, round, project } = usePipelineState()
-  const codeEndRef = useRef<HTMLDivElement>(null)
+  const codeEndRef  = useRef<HTMLDivElement>(null)
+  const scrollRafRef = useRef<number | null>(null)
 
-  // Auto-scroll to bottom as code streams in
+  // Throttle auto-scroll — one scroll per animation frame max
   useEffect(() => {
-    codeEndRef.current?.scrollIntoView({ behavior: 'instant' })
+    if (scrollRafRef.current) return
+    scrollRafRef.current = requestAnimationFrame(() => {
+      codeEndRef.current?.scrollIntoView({ behavior: 'instant' })
+      scrollRafRef.current = null
+    })
   }, [streamingCode])
 
   const isGenerating  = phase === 'phase3_generating'

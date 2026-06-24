@@ -1,5 +1,3 @@
-import { logHumanOverride } from '@/lib/memory/session-log'
-import type { PipelinePhase, SSEEvent } from '@/types'
 
 // ─── Override formatting ──────────────────────────────────────────────────────
 
@@ -49,31 +47,6 @@ export function hasDismissedOverride(modelResponse: string): boolean {
   const dismissal = ['noted, however', 'noted. however', 'understood, but', 'understood but',
                      'acknowledged, however', 'yes but', 'i see, however']
   return dismissal.some(d => lower.includes(d))
-}
-
-// ─── Override injection into pipeline context ─────────────────────────────────
-
-/**
- * Injects a pending human override into the pipeline's context string.
- * The formatted override is prepended so it appears before all task context.
- *
- * Returns the formatted override string so the caller can prepend it to
- * whatever prompt they build next.
- */
-export async function injectHumanOverride(
-  projectId:  string,
-  sessionId:  string,
-  phase:      PipelinePhase,
-  message:    string,
-  emit:       (event: SSEEvent) => void,
-): Promise<string> {
-  const formatted = formatHumanOverride(message)
-  await logHumanOverride(projectId, sessionId, phase, message)
-  // The SSEEvent type doesn't have a dedicated 'human_override' variant —
-  // we surface it as a phase_change event so the client shows the override
-  // card in the pipeline timeline.
-  emit({ type: 'phase_change', phase: 'conflict_escalated' })
-  return formatted
 }
 
 /**

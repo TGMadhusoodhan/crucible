@@ -6,8 +6,8 @@ import { usePipelineState } from '@/store'
 import { cn } from '@/lib/utils'
 
 export function SpecPanel() {
-  const { spec }        = usePipelineState()
-  const { confirmSpec } = usePipeline()
+  const { spec, questions } = usePipelineState()
+  const { confirmSpec }     = usePipeline()
   const [confirming, setConfirming] = useState(false)
   const [error, setError]           = useState<string | null>(null)
 
@@ -124,11 +124,26 @@ export function SpecPanel() {
         {Object.keys(spec.model_defaults).length > 0 && (
           <div>
             <h3 className="mb-2 text-xs font-medium text-zinc-600 uppercase tracking-wide">
-              Model Defaults (unanswered questions)
+              Model Defaults — auto-decided
             </h3>
-            <p className="text-[10px] text-zinc-600">
-              These are assumptions the model made for optional questions you didn't answer.
+            <p className="mb-2 text-[10px] text-zinc-600">
+              You didn't answer these optional questions — the model chose a recommendation:
             </p>
+            <ul className="space-y-1.5">
+              {Object.entries(spec.model_defaults).map(([questionId, optionId]) => {
+                const q   = questions.find(q => q.id === questionId)
+                const opt = q?.options.find(o => o.id === optionId)
+                if (!q || !opt) return null
+                return (
+                  <li key={questionId} className="rounded border border-zinc-800 bg-zinc-900/30 px-3 py-2">
+                    <p className="text-[10px] text-zinc-500">{q.text}</p>
+                    <p className="text-xs text-zinc-400">
+                      → <span className="text-zinc-300">{opt.label}</span>
+                    </p>
+                  </li>
+                )
+              })}
+            </ul>
           </div>
         )}
       </div>

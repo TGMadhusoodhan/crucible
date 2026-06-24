@@ -3,6 +3,7 @@
 import Link from 'next/link'
 import { useCallback, useEffect, useState } from 'react'
 import { usePipelineDispatch, usePipelineState } from '@/store'
+import { usePipeline } from '@/hooks/usePipeline'
 import { cn } from '@/lib/utils'
 import type { ConsensusOutput, Provider, SpecDocument } from '@/types'
 
@@ -92,6 +93,7 @@ interface Project {
 export function ProjectNavigator() {
   const dispatch              = usePipelineDispatch()
   const { project }           = usePipelineState()
+  const { resetSession }      = usePipeline()
   const [projects, setProjects]   = useState<Project[]>([])
   const [showNew, setShowNew]     = useState(false)
   const [deleting, setDeleting]   = useState<string | null>(null)
@@ -107,6 +109,8 @@ export function ProjectNavigator() {
   useEffect(() => { void loadProjects() }, [loadProjects])
 
   function selectProject(p: Project) {
+    // Abort any running pipeline before switching projects
+    resetSession()
     dispatch({
       type: 'SET_PROJECT',
       project: {
@@ -438,6 +442,14 @@ function ModelSelect({
       .catch(() => setError(''))
       .finally(() => setLoading(false))
   }, [provider])
+
+  // Sync the form value when live models load and the curated ID isn't in the list
+  useEffect(() => {
+    if (liveModels.length > 0 && !liveModels.includes(value)) {
+      const first = liveModels[0]
+      if (first) onChange(first)
+    }
+  }, [liveModels])   // eslint-disable-line react-hooks/exhaustive-deps
 
   const fallback = PROVIDER_MODELS[provider]
 

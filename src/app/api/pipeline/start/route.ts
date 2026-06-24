@@ -72,6 +72,18 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       contextText, contextFiles,
     } = parsed.data
 
+    // Crucible's core value: cross-model validation from different training families.
+    // Same provider = same training data = same blind spots = no genuine cross-check.
+    if (primaryProvider === reviewerProvider) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Primary and reviewer must use different providers for genuine cross-validation. Both are set to "${primaryProvider}".`,
+        },
+        { status: 422 },
+      )
+    }
+
     // Get DB user record
     const userRows = await db
       .select({ id: schema.users.id })

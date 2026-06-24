@@ -72,7 +72,11 @@ export function usePipeline() {
   const abortRef = useRef<AbortController | null>(null)
   // Tracks the last phase received via SSE so connectToStream can decide
   // whether to auto-reconnect after the stream closes.
-  const lastPhaseRef = useRef<string>('idle')
+  const lastPhaseRef      = useRef<string>('idle')
+  const reconnectCountRef = useRef<number>(0)
+  const MAX_AUTO_RECONNECTS = 10
+  const tokenBufferRef = useRef<string>('')
+  const rafRef         = useRef<number | null>(null)
 
   // ─── Event dispatcher ──────────────────────────────────────────────────────
 
@@ -100,7 +104,14 @@ export function usePipeline() {
         dispatch({ type: 'SET_PHASE', phase: 'phase2_spec_confirm' })
         break
       case 'token':
-        dispatch({ type: 'TOKEN', text: event.text })
+        tokenBufferRef.current += event.text
+        if (!rafRef.current) {
+          rafRef.current = requestAnimationFrame(() => {
+            dispatch({ type: 'TOKEN', text: tokenBufferRef.current })
+            tokenBufferRef.current = ''
+            rafRef.current = null
+          })
+        }
         break
       case 'self_check_done':
         dispatch({ type: 'SELF_CHECK_DONE', output: event.output })
@@ -152,6 +163,15 @@ export function usePipeline() {
       dispatch({ type: 'SET_ERROR', error: err instanceof Error ? err.message : 'Stream error' })
       return
     } finally {
+      if (rafRef.current) {
+        cancelAnimationFrame(rafRef.current)
+        // Flush any remaining buffered tokens
+        if (tokenBufferRef.current) {
+          dispatch({ type: 'TOKEN', text: tokenBufferRef.current })
+          tokenBufferRef.current = ''
+        }
+        rafRef.current = null
+      }
       if (abortRef.current === controller) {
         abortRef.current = null
         dispatch({ type: 'SET_STREAMING', value: false })
@@ -163,7 +183,18 @@ export function usePipeline() {
     // This handles the normal split (phase3_reviewing), Vercel timeout mid-self-check
     // (phase3_self_check), and any other unexpected mid-pipeline disconnect.
     if (!NO_AUTO_RECONNECT.has(lastPhaseRef.current)) {
-      void connectToStream(sessionId)
+      if (reconnectCountRef.current < MAX_AUTO_RECONNECTS) {
+        reconnectCountRef.current++
+        void connectToStream(sessionId)
+      } else {
+        dispatch({
+          type: 'SET_ERROR',
+          error: `Pipeline stalled after ${MAX_AUTO_RECONNECTS} reconnects. Refresh to retry.`,
+        })
+      }
+    } else {
+      // Reached a gate — reset reconnect counter
+      reconnectCountRef.current = 0
     }
   }, [dispatch, handleSSEEvent])
 
@@ -235,7 +266,7 @@ export function usePipeline() {
     if (!data.success) throw new Error(data.error ?? 'Failed to confirm spec')
 
     dispatch({ type: 'SET_PHASE', phase: 'phase3_generating' })
-    dispatch({ type: 'TOKEN', text: '' })  // reset streaming code buffer
+    // streamingCode is reset in the reducer when phase becomes 'phase3_generating'
     void connectToStream(state.sessionId)
   }, [state.sessionId, dispatch, connectToStream])
 
@@ -337,6 +368,7 @@ export function usePipeline() {
       dispatch({ type: 'SET_PROJECT', project }),
     resetSession: () => {
       lastPhaseRef.current = 'idle'
+      reconnectCountRef.current = 0
       dispatch({ type: 'RESET_SESSION' })
     },
   }

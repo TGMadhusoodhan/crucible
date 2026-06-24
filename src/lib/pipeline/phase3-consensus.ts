@@ -34,7 +34,7 @@ export async function runPhase3Consensus(
   if (review.consensus) {
     const checkpointId = await saveCheckpoint(
       projectId,
-      'conflict_resolved',
+      'module_complete',
       `Consensus reached on round ${review.round}`,
       { 'output.txt': code },
     )

@@ -17,7 +17,7 @@ const MAX_ALIGNMENT_ROUNDS = 2
 // Conflict signal words: if a model's position contains these, it flagged a mismatch.
 const CONFLICT_SIGNALS = [
   'conflict', 'disagree', 'mismatch', 'inconsistent', 'incompatible',
-  'however', 'but i think', 'different approach', 'contradicts',
+  'but i think', 'different approach', 'contradicts',
 ]
 
 function hasConflictSignal(position: string): boolean {

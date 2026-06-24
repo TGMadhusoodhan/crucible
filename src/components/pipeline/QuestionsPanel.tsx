@@ -142,10 +142,34 @@ export function QuestionsPanel() {
   if (phase === 'phase2_contradictions' && contradiction) {
     return (
       <div className="flex h-full flex-col items-center justify-center p-6">
-        <div className="w-full max-w-xl rounded-lg border border-yellow-800/50 bg-yellow-950/20 p-5 space-y-3">
-          <h3 className="text-sm font-medium text-yellow-400">Contradiction Detected</h3>
-          <p className="text-xs text-zinc-300">{contradiction.description}</p>
-          <p className="text-xs text-zinc-500">Choose a resolution and resubmit your answers.</p>
+        <div className="w-full max-w-xl space-y-4">
+          <div className="rounded-lg border border-yellow-800/50 bg-yellow-950/20 p-5 space-y-2">
+            <h3 className="text-sm font-medium text-yellow-400">⚠ Contradiction Detected</h3>
+            <p className="text-xs text-zinc-300">{contradiction.description}</p>
+            <p className="text-xs text-zinc-500">
+              Your answers conflict with each other. Choose how to resolve:
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            {contradiction.resolution_options.map((opt) => (
+              <button
+                key={opt.id}
+                onClick={() => {
+                  Object.entries(opt.changes).forEach(([questionId, optionId]) => {
+                    answerQuestion(questionId, optionId)
+                  })
+                }}
+                className="w-full text-left rounded border border-zinc-700 bg-zinc-900 px-4 py-3 text-xs text-zinc-200 hover:border-zinc-500 hover:bg-zinc-800 transition-colors"
+              >
+                {opt.description}
+              </button>
+            ))}
+          </div>
+
+          <p className="text-[10px] text-zinc-600 text-center">
+            After selecting a resolution, click Continue above to proceed.
+          </p>
         </div>
       </div>
     )

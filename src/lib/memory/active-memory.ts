@@ -1,6 +1,6 @@
 import { generateId } from '@/lib/utils'
 import type { Conflict, Decision, ProjectMemory } from '@/types'
-import { estimateTokens } from './filesystem'
+import { estimateTokens } from '@/lib/utils/tokens'
 
 // Active memory must stay under 8k tokens — anything over triggers compression.
 const ACTIVE_MEMORY_TOKEN_LIMIT = 8_000

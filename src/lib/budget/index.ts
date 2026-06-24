@@ -31,12 +31,11 @@ function legacyMonthlyBudgetKey(userId: string) {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function getRedis(): Redis {
-  return new Redis({
-    url:   process.env.UPSTASH_REDIS_REST_URL!,
-    token: process.env.UPSTASH_REDIS_REST_TOKEN!,
-  })
-}
+const _redis = new Redis({
+  url:   process.env.UPSTASH_REDIS_REST_URL!,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+})
+function getRedis(): Redis { return _redis }
 
 function currentYearMonth(): string {
   const d = new Date()
@@ -87,24 +86,17 @@ export async function recordUsage(
   const redis     = getRedis()
   const ym        = currentYearMonth()
 
-  await Promise.all([
-    // global spend (month)
-    redis.incrbyfloat(globalSpendKey(userId, ym), costUsd).then(() =>
-      redis.expire(globalSpendKey(userId, ym), SPEND_KEY_TTL),
-    ),
-    // per-provider spend (month)
-    redis.incrbyfloat(providerSpendKey(userId, provider, ym), costUsd).then(() =>
-      redis.expire(providerSpendKey(userId, provider, ym), SPEND_KEY_TTL),
-    ),
-    // session cost
-    redis.incrbyfloat(sessionCostKey(userId, sessionId), costUsd).then(() =>
-      redis.expire(sessionCostKey(userId, sessionId), SESSION_KEY_TTL),
-    ),
-    // session tokens
-    redis.incrby(sessionTokenKey(userId, sessionId), totalTok).then(() =>
-      redis.expire(sessionTokenKey(userId, sessionId), SESSION_KEY_TTL),
-    ),
-  ])
+  // Batch all 8 Redis commands into a single pipeline request
+  const pipe = redis.pipeline()
+  pipe.incrbyfloat(globalSpendKey(userId, ym), costUsd)
+  pipe.expire(globalSpendKey(userId, ym), SPEND_KEY_TTL)
+  pipe.incrbyfloat(providerSpendKey(userId, provider, ym), costUsd)
+  pipe.expire(providerSpendKey(userId, provider, ym), SPEND_KEY_TTL)
+  pipe.incrbyfloat(sessionCostKey(userId, sessionId), costUsd)
+  pipe.expire(sessionCostKey(userId, sessionId), SESSION_KEY_TTL)
+  pipe.incrby(sessionTokenKey(userId, sessionId), totalTok)
+  pipe.expire(sessionTokenKey(userId, sessionId), SESSION_KEY_TTL)
+  await pipe.exec()
 }
 
 /**

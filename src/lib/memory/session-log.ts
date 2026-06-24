@@ -80,7 +80,7 @@ export function logThinkingDone(
   actor: 'primary' | 'reviewer',
   output: ThinkingOutput,
 ): Promise<void> {
-  const actorLabel = actor === 'primary' ? output.model_id : output.model_id
+  const actorLabel = `${actor === 'primary' ? 'Primary' : 'Reviewer'} (${output.model_id})`
   const summary    = `${actorLabel} thinking done — ${output.questions.length} question(s), ${output.assumptions.length} assumption(s)`
   const fullContent = [
     `Understood as: ${output.understood_as}`,

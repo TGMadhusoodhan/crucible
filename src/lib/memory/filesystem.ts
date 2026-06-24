@@ -29,12 +29,11 @@ const KEY = {
   outputIndex: (pid: string)              => `fs:${pid}:output_files`,
 }
 
-function getRedis(): Redis {
-  return new Redis({
-    url:   process.env.UPSTASH_REDIS_REST_URL!,
-    token: process.env.UPSTASH_REDIS_REST_TOKEN!,
-  })
-}
+const _redis = new Redis({
+  url:   process.env.UPSTASH_REDIS_REST_URL!,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+})
+function getRedis(): Redis { return _redis }
 
 // Upstash may return list items as already-parsed objects or raw strings.
 // This helper handles both cases.
@@ -295,8 +294,5 @@ export async function listCheckpoints(
   }
 }
 
-// ─── Token estimation (used by budget governor) ───────────────────────────────
-
-export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / CHARS_PER_TOKEN)
-}
+// ─── Token estimation — re-exported from canonical location ──────────────────
+export { estimateTokens } from '@/lib/utils/tokens'

@@ -17,12 +17,11 @@ interface ProjectData {
   createdAt: number
 }
 
-function getRedis() {
-  return new Redis({
-    url: process.env.UPSTASH_REDIS_REST_URL!,
-    token: process.env.UPSTASH_REDIS_REST_TOKEN!,
-  })
-}
+const _redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL!,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+})
+function getRedis() { return _redis }
 
 const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together'] as const
 
@@ -83,6 +82,9 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     const redis = getRedis()
     await redis.set(`project:${userId}:${project.id}`, project, { ex: 60 * 60 * 24 * 365 })
     await redis.sadd(`projects:${userId}`, project.id)
+    // Set TTL on the index set — refreshed on every project creation.
+    // Prevents the set from accumulating forever with expired project IDs.
+    await redis.expire(`projects:${userId}`, 60 * 60 * 24 * 365 * 3)  // 3 years
 
     return NextResponse.json({ success: true, data: project }, { status: 201 })
   } catch (err) {

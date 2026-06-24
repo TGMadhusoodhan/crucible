@@ -135,6 +135,9 @@ function reducer(state: PipelineState, action: PipelineAction): PipelineState {
         ...state,
         phase: action.phase,
         round: action.round ?? state.round,
+        // Reset the code buffer at the start of every generation round so
+        // round 2+ tokens are never appended to round 1's output.
+        streamingCode: action.phase === 'phase3_generating' ? '' : state.streamingCode,
         // Preserve the error message when landing on the error phase — clearing it
         // here would hide the error banner and make the UI look like a silent reset.
         error: action.phase === 'error' ? state.error : null,

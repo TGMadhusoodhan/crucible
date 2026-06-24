@@ -13,7 +13,7 @@ import { detectContradictions }    from './phase2-contradiction'
 import { runPhase2Spec }           from './phase2-spec'
 import { runPhase3Generate }       from './phase3-generate'
 import { runPhase3Review }         from './phase3-review'
-import { runPhase3Consensus, promoteAfterHumanResolution } from './phase3-consensus'
+import { runPhase3Consensus } from './phase3-consensus'
 import { consumePendingOverrides } from './human-override'
 import type {
   BudgetMode,
@@ -30,19 +30,17 @@ import type {
 // ─── Redis key helpers ────────────────────────────────────────────────────────
 
 const STATE_KEY   = (sid: string) => `pipeline:${sid}:state`
-const EVENTS_KEY  = (sid: string) => `pipeline:${sid}:events`
 const CONTROL_KEY = (sid: string) => `pipeline:${sid}:control`
 const OUTPUT_KEY  = (uid: string, pid: string) => `project_output:${uid}:${pid}`
 
 const SESSION_TTL = 60 * 60 * 24         // 24 hours
 const OUTPUT_TTL  = 60 * 60 * 24 * 365   // 1 year — survives across devices
 
-function getRedis(): Redis {
-  return new Redis({
-    url:   process.env.UPSTASH_REDIS_REST_URL!,
-    token: process.env.UPSTASH_REDIS_REST_TOKEN!,
-  })
-}
+const _redis = new Redis({
+  url:   process.env.UPSTASH_REDIS_REST_URL!,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+})
+function getRedis(): Redis { return _redis }
 
 // ─── Session state — Redis CRUD ───────────────────────────────────────────────
 
@@ -61,33 +59,6 @@ export async function saveSessionState(state: PipelineSessionState): Promise<voi
   const redis = getRedis()
   state.updatedAt = Date.now()
   await redis.setex(STATE_KEY(state.sessionId), SESSION_TTL, JSON.stringify(state))
-}
-
-// ─── SSE event queue ─────────────────────────────────────────────────────────
-
-export async function publishEvent(sessionId: string, event: SSEEvent): Promise<void> {
-  const redis = getRedis()
-  await redis.rpush(EVENTS_KEY(sessionId), JSON.stringify(event))
-  await redis.expire(EVENTS_KEY(sessionId), SESSION_TTL)
-}
-
-/**
- * Consume all queued SSE events for a session — used by the SSE stream route.
- * LMPOP atomically removes and returns up to `count` events from the head.
- */
-export async function consumeEvents(sessionId: string, count = 50): Promise<SSEEvent[]> {
-  const redis = getRedis()
-  // Upstash supports LPOP with count argument
-  const raw = await redis.lpop<string>(EVENTS_KEY(sessionId), count)
-  if (!raw) return []
-  const items = Array.isArray(raw) ? raw : [raw]
-  return items.flatMap(item => {
-    try {
-      return [JSON.parse(item) as SSEEvent]
-    } catch {
-      return []
-    }
-  })
 }
 
 // ─── Project-level output (long-lived, cross-device) ─────────────────────────
@@ -193,6 +164,7 @@ export async function pauseSession(sessionId: string): Promise<void> {
   const state = await getSessionState(sessionId)
   if (!state) return
   await logPause(state.projectId, sessionId, state.phase)
+  state.previousPhase = state.phase   // remember where we paused
   state.phase = 'paused'
   await saveSessionState(state)
 }
@@ -261,6 +233,7 @@ export async function resolveConflict(
   state.pendingHumanOverrides.push(overrideMessage)
   state.phase = 'phase3_generating'
   state.round = 1  // Reset round — human decision anchors both models
+  state.lastReview = undefined   // clear stale review — new generation starts fresh
   await saveSessionState(state)
 }
 
@@ -299,10 +272,9 @@ function makeEmit(
   sessionId:     string,
   externalEmit?: (event: SSEEvent) => void,
 ): (event: SSEEvent) => void {
+  // Emit directly via SSE — no Redis queue needed (consumeEvents was never called).
+  void sessionId  // kept for potential future use
   return (event: SSEEvent) => {
-    publishEvent(sessionId, event).catch(err =>
-      console.error(`[orchestrator] publishEvent failed for ${sessionId}:`, err)
-    )
     externalEmit?.(event)
   }
 }
@@ -326,6 +298,8 @@ function recordAndRefreshBudget(
     .then(budget => {
       if (budget.mode !== state.budgetMode) {
         state.budgetMode = budget.mode
+        // Persist the updated mode — transition() already ran with the old value
+        saveSessionState(state).catch(() => {})
         logBudgetModeChange(state.projectId, state.sessionId, state.phase, budget.mode).catch(() => {})
         emit({ type: 'phase_change', phase: state.phase })
       }
@@ -367,6 +341,15 @@ export async function runPipeline(
   let state = await getSessionState(sessionId)
   if (!state) throw new Error(`Session not found: ${sessionId}`)
 
+  // ─── Resume from pause ────────────────────────────────────────────────────────
+  // playSession clears the control signal but doesn't change the phase.
+  // Restore the pre-pause phase so the pipeline can continue from where it left off.
+  if (state.phase === 'paused') {
+    const resumePhase = state.previousPhase ?? 'phase3_generating'
+    state.previousPhase = undefined
+    state = await transition(state, resumePhase)
+  }
+
   const emit      = makeEmit(sessionId, externalEmit)
   const projectId = state.projectId
   const { config } = state
@@ -383,6 +366,7 @@ export async function runPipeline(
       return true
     }
     if (signal === 'pause') {
+      state!.previousPhase = state!.phase   // remember where we paused
       state = await transition(state!, 'paused')
       return true
     }
@@ -570,8 +554,12 @@ export async function runPipeline(
         )
         state.generatedCode   = genResult.code
         state.selfCheckOutput = genResult.selfCheckOutput
+        // Estimate full prompt size: spec + task + history + criteria + edge cases
+        const genPromptTokens = estimateTokens(ctx.taskDescription)
+          + estimateTokens(JSON.stringify(ctx.spec))
+          + estimateTokens(ctx.history.map(m => m.content).join(' '))
         recordAndRefreshBudget(state, config.primaryProvider, config.primaryModelId,
-          estimateTokens(ctx.taskDescription), genResult.tokensOut, emit)
+          genPromptTokens, genResult.tokensOut, emit)
         state = await transition(state, 'phase3_reviewing')
         // Return so the SSE stream closes. The client sees phase3_reviewing and
         // immediately reconnects. The new invocation picks up at phase3_reviewing below.
@@ -614,8 +602,12 @@ export async function runPipeline(
           },
         ]
 
+        // Reviewer sees: code + spec + previous review flags
+        const reviewPromptTokens = estimateTokens(code)
+          + estimateTokens(JSON.stringify(ctx.spec))
+          + (state.lastReview ? estimateTokens(JSON.stringify(state.lastReview)) : 0)
         recordAndRefreshBudget(state, config.reviewerProvider, config.reviewerModelId,
-          estimateTokens(code), estimateTokens(JSON.stringify(review)), emit)
+          reviewPromptTokens, estimateTokens(JSON.stringify(review)), emit)
         state = await transition(state, 'phase3_consensus')
       } catch (err) {
         await handleError(state, err, emit)
@@ -664,22 +656,6 @@ export async function runPipeline(
   // ─── Gate: waiting for conflict resolution ────────────────────────────────
 
   if (state.phase === 'conflict_escalated') return
-}
-
-// ─── Human conflict resolution (called after resolveConflict()) ──────────────
-
-export async function resumeAfterConflictResolution(sessionId: string): Promise<void> {
-  const state = await getSessionState(sessionId)
-  if (!state || !state.generatedCode || !state.lastReview) return
-
-  const emit = makeEmit(sessionId)
-  await promoteAfterHumanResolution(
-    state.projectId, sessionId,
-    state.generatedCode, state.lastReview, emit,
-  )
-
-  state.phase = 'complete'
-  await saveSessionState(state)
 }
 
 // ─── Error handler ────────────────────────────────────────────────────────────

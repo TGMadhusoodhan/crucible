@@ -3,12 +3,11 @@ import { Redis } from '@upstash/redis'
 import { NextResponse } from 'next/server'
 import type { ApiResponse } from '@/types'
 
-function getRedis() {
-  return new Redis({
-    url: process.env.UPSTASH_REDIS_REST_URL!,
-    token: process.env.UPSTASH_REDIS_REST_TOKEN!,
-  })
-}
+const _redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL!,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+})
+function getRedis() { return _redis }
 
 // GET /api/projects/:id — get project details
 export async function GET(
