@@ -24,6 +24,8 @@ export async function GET(request: Request): Promise<Response> {
     'paused', 'stopped', 'complete', 'error',
     // phase3_reviewing is a split point: generation done, reconnect for review + edit + verify + dialogue
     'phase3_reviewing',
+    // file gate: pipeline pauses here for per-file human review
+    'phase3_file_gate', 'phase3_file_feedback',
   ])
 
   const encoder = new TextEncoder()

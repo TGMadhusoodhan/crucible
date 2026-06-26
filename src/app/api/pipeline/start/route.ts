@@ -91,7 +91,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
         reviewerModelId,
         reviewerApiKey,
       },
-      contextInput: contextText || (contextFiles?.length)
+      contextInput: (contextText || contextFiles?.length)
         ? { text: contextText, files: contextFiles }
         : undefined,
     })

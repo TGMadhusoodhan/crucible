@@ -162,7 +162,8 @@ MULTI-FILE TASK: use ONLY these exact delimiters for every file:
 
 Rules that are NEVER negotiable:
 × No prose before, between, or after the files
-× No markdown fences (no \`\`\`python, no \`\`\`javascript, nothing)
+× No markdown fences of any kind — not around individual files, not around the whole output
+× Do NOT wrap the entire output in a single \`\`\` block — that causes only one file to be parsed
 × No "Here is the code", "Step 1:", "First I'll implement..."
 × No "TODO", no placeholders, no "..." — every file must be complete
 × Every file appears EXACTLY ONCE — never repeat or re-emit a file

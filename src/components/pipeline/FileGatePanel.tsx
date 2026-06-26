@@ -33,6 +33,7 @@ export function FileGatePanel() {
     setReverted(false)
     setModelRole('primary')
     setLastModelId(null)
+    setAccepting(false)  // clear spinner when next file arrives (or same file reloads)
   }, [currentFileCode, currentFilename])
 
   if (phase !== 'phase3_file_gate' || !currentFilename) return null

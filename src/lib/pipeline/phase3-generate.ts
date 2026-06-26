@@ -170,12 +170,19 @@ async function runSelfCheckPass(
 // Parses === FILE: path === ... === /FILE === delimiters from AI output.
 // Falls back to { 'output.txt': raw } if no delimiters are found (single-file task).
 export function parseMultiFileOutput(raw: string): Record<string, string> {
+  // Strip an outer markdown code fence if the model wrapped the entire output in one.
+  // Pattern: optional language tag, then content, then closing ```.
+  // This is a common failure mode where the model wraps all FILE: blocks in a single fence.
+  let text = raw.trim()
+  const outerFence = text.match(/^```[a-z]*\r?\n([\s\S]*?)```\s*$/)
+  if (outerFence?.[1]) text = outerFence[1]
+
   const files: Record<string, string> = {}
   // Accept both LF and CRLF line endings — AI models on Windows or Azure may output CRLF.
   // trim() on filename strips any trailing \r from CRLF sequences.
   const pattern = /=== FILE: (.+?) ===\r?\n([\s\S]*?)=== \/FILE ===/g
   let match: RegExpExecArray | null
-  while ((match = pattern.exec(raw)) !== null) {
+  while ((match = pattern.exec(text)) !== null) {
     const filename = match[1].trim()
     const content  = match[2]
     if (filename) files[filename] = content
