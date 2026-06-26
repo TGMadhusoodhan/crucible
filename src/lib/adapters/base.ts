@@ -150,19 +150,38 @@ Rules:
 export const GENERATION_SYSTEM_PROMPT = `You are an expert software engineer — the primary code generator in a multi-model pipeline.
 You have received a confirmed specification. Your job: implement it completely.
 
+═══ OUTPUT FORMAT — MANDATORY ═══════════════════════════════════════════════════
+
+SINGLE-FILE TASK: return the file content only. No preamble, no explanation, no markdown fences.
+
+MULTI-FILE TASK: use ONLY these exact delimiters for every file:
+
+=== FILE: relative/path/to/file.ext ===
+(complete file content — every line)
+=== /FILE ===
+
+Rules that are NEVER negotiable:
+× No prose before, between, or after the files
+× No markdown fences (no \`\`\`python, no \`\`\`javascript, nothing)
+× No "Here is the code", "Step 1:", "First I'll implement..."
+× No "TODO", no placeholders, no "..." — every file must be complete
+× Every file appears EXACTLY ONCE — never repeat or re-emit a file
+× No explanation of what you wrote — the code explains itself
+
+═══ IMPLEMENTATION RULES ═════════════════════════════════════════════════════════
+
 NORMAL MODE (default):
 - Write clean, correct, production-ready code
-- Return the FULL implementation — no placeholders, no TODO, no truncation
-- Handle every edge case and error scenario listed in the spec
+- Return the FULL implementation for every file
+- Handle every edge case and error scenario in the spec
 - Use the language and framework implied by the task
-- Add a comment only when the reason is genuinely non-obvious
-- Return code directly — no preamble like "Here is the code:"
+- Add a comment only when the WHY is genuinely non-obvious
 
 PATCH MODE (activated when prompt begins with "PATCH MODE:"):
 - A reviewer found specific bugs. Do NOT regenerate from scratch.
-- Read the provided code carefully
-- Make ONLY the minimal targeted edits to fix the listed issues — touch nothing else
-- Return the complete patched file — every unflagged line must be identical to the original`
+- Make ONLY the minimal targeted edits to fix the listed issues
+- Touch nothing else — not variable names, not comments, not structure
+- For multi-file output, preserve all === FILE: === delimiters and all other files byte-for-byte`
 
 export const SELF_CHECK_SYSTEM_PROMPT = `You are a software engineer reviewing your own code.
 Your job: find bugs in the code you just wrote, using the spec as the source of truth.
@@ -232,26 +251,27 @@ Output raw JSON only. No markdown fences. No explanation before or after.`
 export const REVIEWER_EDIT_SYSTEM_PROMPT = `You are a code reviewer inside a multi-model coding pipeline.
 You previously reviewed code and flagged specific bugs. Your job now: produce surgical code edits ONLY at the exact locations you flagged.
 
-Return ONLY this exact JSON — no prose outside the JSON:
-{
-  "hunks": [
-    {
-      "location": "function name or line reference",
-      "original": "the exact code snippet as it appears in the file — must match character-for-character",
-      "replacement": "your corrected version of that exact snippet",
-      "reason": "one sentence — what bug this edit fixes"
-    }
-  ],
-  "reasoning": "one paragraph summarizing all the edits",
-  "resolves": ["f1", "f2"]
-}
+Use this EXACT format — one block per hunk, no JSON, no markdown:
+
+=== HUNK ===
+LOCATION: function name or line reference
+REASON: one sentence — what bug this edit fixes
+--- ORIGINAL ---
+(the exact code snippet as it appears in the file — copied verbatim)
+--- REPLACEMENT ---
+(your corrected version of that exact snippet)
+=== END HUNK ===
+
+=== REASONING ===
+One paragraph summarizing all the edits and which flag IDs they resolve.
+=== END REASONING ===
 
 CRITICAL RULES:
-× NEVER touch code that is not directly related to the flagged issues
-× The "original" field must be copied verbatim from the provided code — not paraphrased
-× Only produce hunks for HIGH or MEDIUM severity issues — LOW issues do not need edits
-× If a flagged issue cannot be fixed with a targeted edit (requires architectural change), set hunks to [] and explain in reasoning
-× Output raw JSON only. No markdown fences.`
+× NEVER touch code not directly related to the flagged issues
+× ORIGINAL must be copied verbatim from the provided code — not paraphrased
+× Only produce hunks for HIGH or MEDIUM severity issues — skip LOW issues
+× If an issue requires architectural change (not a targeted edit), omit its hunk and explain in REASONING
+× No prose outside the delimiters above`
 
 export const CODER_VERIFY_SYSTEM_PROMPT = `You are the primary code generator in a multi-model pipeline.
 A reviewer has made edits to your code. Your job: evaluate each edit honestly.
@@ -303,6 +323,98 @@ Output raw JSON only. No markdown fences.`
 // ─── JSON parsers ─────────────────────────────────────────────────────────────
 
 /**
+ * Escape literal control characters (newline, carriage return, tab, and all
+ * other U+0000–U+001F) that appear inside JSON string values.
+ *
+ * Models frequently embed multi-line code in "original"/"replacement" hunk
+ * fields using actual newline bytes rather than the \\n JSON escape sequence.
+ * JSON.parse rejects literal control characters inside strings per RFC 7159,
+ * so we fix them before parsing.
+ */
+/**
+ * Fix two classes of malformed JSON produced by models embedding code in strings:
+ *
+ * 1. Literal control characters (newline, tab, CR, etc.) inside string values —
+ *    JSON.parse rejects them per RFC 7159; replace with \\n, \\t, \\r, \\uXXXX.
+ *
+ * 2. Invalid backslash escape sequences inside string values — Python code often
+ *    contains \d, \s, \w (regex), \n inside raw strings, \' single-quote escapes,
+ *    etc. These are not valid JSON escapes so JSON.parse throws SyntaxError.
+ *    We double the backslash: \d → \\d, keeping valid sequences (\\, \", \/, \b,
+ *    \f, \n, \r, \t, \uXXXX) untouched.
+ */
+function sanitizeJsonString(text: string): string {
+  const VALID_ESCAPES = new Set(['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u'])
+
+  let result  = ''
+  let inString = false
+  let i = 0
+
+  while (i < text.length) {
+    const ch   = text[i]!
+    const code = ch.charCodeAt(0)
+
+    if (!inString) {
+      result += ch
+      if (ch === '"') inString = true
+      i++
+      continue
+    }
+
+    // Inside a string value
+    if (ch === '\\') {
+      const next = text[i + 1]
+      if (next === undefined) {
+        // Trailing backslash at end of input — escape it
+        result += '\\\\'
+        i++
+        continue
+      }
+
+      if (VALID_ESCAPES.has(next)) {
+        // Valid JSON escape — keep as-is (\n, \\, \", \uXXXX, etc.)
+        if (next === 'u') {
+          // \uXXXX — keep the full 6-char sequence
+          result += text.slice(i, i + 6)
+          i += 6
+        } else {
+          result += '\\' + next
+          i += 2
+        }
+        continue
+      }
+
+      // Invalid escape (e.g. \d, \s, \w, \', \`) — double the backslash
+      result += '\\\\' + next
+      i += 2
+      continue
+    }
+
+    if (ch === '"') {
+      inString = false
+      result += ch
+      i++
+      continue
+    }
+
+    if (code < 0x20) {
+      // Literal control character — JSON-escape it
+      if      (ch === '\n') result += '\\n'
+      else if (ch === '\r') result += '\\r'
+      else if (ch === '\t') result += '\\t'
+      else result += `\\u${code.toString(16).padStart(4, '0')}`
+      i++
+      continue
+    }
+
+    result += ch
+    i++
+  }
+
+  return result
+}
+
+/**
  * Scan `text` for valid JSON objects using a stack-based brace matcher.
  * Returns them in order of appearance (outermost first per starting `{`).
  * This handles prose-wrapped JSON like "Here's my analysis: {...}" where the
@@ -337,8 +449,10 @@ export function parseJSON<T>(text: string, phase: string): T | null {
 
   const candidates: string[] = []
 
-  // 1. JSON inside a markdown fence — most reliable when model ignores "no fences" rule
-  const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/)
+  // 1. JSON inside a markdown fence — most reliable when model ignores "no fences" rule.
+  // Use greedy match ([\s\S]*) so code hunks containing backticks don't truncate the capture.
+  // Non-greedy would stop at the first ``` inside the JSON (e.g. python code in a hunk).
+  const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*)```/)
   if (fenceMatch?.[1]) candidates.push(fenceMatch[1].trim())
 
   // 2. All syntactically valid JSON objects found via stack-based extraction
@@ -350,7 +464,11 @@ export function parseJSON<T>(text: string, phase: string): T | null {
   for (const c of candidates) {
     const t = c.trim()
     if (!t.startsWith('{')) continue
-    try { return JSON.parse(t) as T } catch { /* try next candidate */ }
+    // First attempt: raw parse
+    try { return JSON.parse(t) as T } catch { /* fall through to sanitized attempt */ }
+    // Second attempt: sanitize invalid escape sequences and literal control chars —
+    // models embed Python/shell code with backslashes and newlines inside JSON strings.
+    try { return JSON.parse(sanitizeJsonString(t)) as T } catch { /* try next candidate */ }
   }
 
   console.warn(`[${phase}] JSON parse failed (${text.length} chars). First 120:`, text.slice(0, 120))
@@ -453,13 +571,40 @@ export function parseReviewPayload(text: string, round: number): ReviewPayload {
 }
 
 export function parseReviewEdit(text: string): ReviewEdit {
-  const raw = parseJSON<Record<string, unknown>>(text, 'reviewerEdit')
-  if (!raw) return { hunks: [], reasoning: 'Reviewer returned malformed JSON — skipping edits', resolves: [] }
+  // Primary path: delimiter-based format (=== HUNK === ... === END HUNK ===)
+  // This avoids all JSON escaping issues with embedded code (quotes, backslashes, newlines).
+  const hunkPattern = /=== HUNK ===\s*\nLOCATION:\s*(.+?)\nREASON:\s*(.+?)\n--- ORIGINAL ---\n([\s\S]*?)--- REPLACEMENT ---\n([\s\S]*?)=== END HUNK ===/g
   const hunks: ReviewHunk[] = []
+  let match: RegExpExecArray | null
+
+  while ((match = hunkPattern.exec(text)) !== null) {
+    const [, location, reason, original, replacement] = match
+    if (location && original !== undefined && replacement !== undefined) {
+      hunks.push({
+        location:    location.trim(),
+        reason:      (reason ?? '').trim(),
+        original:    original,      // preserve exact whitespace — applyHunks needs it
+        replacement: replacement,
+      })
+    }
+  }
+
+  const reasoningMatch = text.match(/=== REASONING ===\s*\n([\s\S]*?)=== END REASONING ===/)
+  const reasoning = reasoningMatch?.[1]?.trim() ?? ''
+
+  if (hunks.length > 0 || reasoning) {
+    return { hunks, reasoning, resolves: [] }
+  }
+
+  // Fallback: try JSON for models that ignore the format instruction
+  const raw = parseJSON<Record<string, unknown>>(text, 'reviewerEdit')
+  if (!raw) return { hunks: [], reasoning: 'Reviewer returned unparseable output — skipping edits', resolves: [] }
+
+  const jsonHunks: ReviewHunk[] = []
   if (Array.isArray(raw.hunks)) {
     for (const h of raw.hunks as Array<Record<string, unknown>>) {
       if (typeof h.location === 'string' && typeof h.original === 'string' && typeof h.replacement === 'string') {
-        hunks.push({
+        jsonHunks.push({
           location:    h.location,
           original:    h.original,
           replacement: h.replacement,
@@ -469,7 +614,7 @@ export function parseReviewEdit(text: string): ReviewEdit {
     }
   }
   return {
-    hunks,
+    hunks:     jsonHunks,
     reasoning: typeof raw.reasoning === 'string' ? raw.reasoning : '',
     resolves:  Array.isArray(raw.resolves) ? raw.resolves.map(String) : [],
   }
@@ -662,7 +807,16 @@ export function buildGenerationPrompt(ctx: PipelineContext, patchInstructions?: 
       ]
     : []
 
-  return [...specSummary, ...historySection].join('\n')
+  const formatReminder = [
+    '',
+    'OUTPUT FORMAT REMINDER:',
+    '- Generate ALL files required by this task in a single response — do not stop early.',
+    '- Multi-file task → use === FILE: path === ... === /FILE === for every file. Each file exactly once.',
+    '- No prose, no markdown fences, no explanations. Code only.',
+    '- Do not stop after the first file or first few files. Every file must be complete before you stop.',
+  ]
+
+  return [...specSummary, ...historySection, ...formatReminder].join('\n')
 }
 
 export function buildSelfCheckPrompt(
@@ -767,8 +921,8 @@ export function buildReviewerEditPrompt(
     '```',
     '',
     'Produce surgical code hunks for ONLY the flagged issues above.',
-    'Copy the "original" field verbatim from the code — it must match exactly.',
-    'Return raw JSON only.',
+    'Copy the ORIGINAL section verbatim from the code — it must match character-for-character.',
+    'Use the === HUNK === ... === END HUNK === format from your instructions. No JSON, no markdown.',
   ].join('\n')
 }
 
@@ -920,6 +1074,8 @@ export function phaseLabel(phase: PipelinePhase): string {
     phase3_coder_verify:    'Phase 3: Coder Verifying',
     phase3_dialogue:        'Phase 3: Model Dialogue',
     phase3_consensus:       'Phase 3: Consensus',
+    phase3_file_gate:       'Phase 3: File Review',
+    phase3_file_feedback:   'Phase 3: File Feedback',
     conflict_escalated:     'Conflict Escalated',
     complete:               'Complete',
     paused:                 'Paused',

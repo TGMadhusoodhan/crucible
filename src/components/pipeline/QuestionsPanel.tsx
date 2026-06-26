@@ -147,7 +147,7 @@ export function QuestionsPanel() {
             <h3 className="text-sm font-medium text-yellow-400">⚠ Contradiction Detected</h3>
             <p className="text-xs text-zinc-300">{contradiction.description}</p>
             <p className="text-xs text-zinc-500">
-              Your answers conflict with each other. Choose how to resolve:
+              Your answers conflict. Select a resolution to continue:
             </p>
           </div>
 
@@ -155,21 +155,42 @@ export function QuestionsPanel() {
             {contradiction.resolution_options.map((opt) => (
               <button
                 key={opt.id}
-                onClick={() => {
-                  Object.entries(opt.changes).forEach(([questionId, optionId]) => {
-                    answerQuestion(questionId, optionId)
-                  })
+                disabled={submitting}
+                onClick={async () => {
+                  // Build final answers by applying resolution changes on top of current
+                  // answers + all recommended defaults. Cannot rely on answerQuestion
+                  // dispatch updating userAnswers synchronously within this closure.
+                  const merged: Record<string, string> = { ...userAnswers, ...opt.changes }
+                  for (const q of questions) {
+                    if (!merged[q.id] && q.recommended_option_id) {
+                      merged[q.id] = q.recommended_option_id
+                    }
+                  }
+                  setError(null)
+                  setSubmitting(true)
+                  try {
+                    await submitAnswers(merged)
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : 'Submit failed')
+                  } finally {
+                    setSubmitting(false)
+                  }
                 }}
-                className="w-full text-left rounded border border-zinc-700 bg-zinc-900 px-4 py-3 text-xs text-zinc-200 hover:border-zinc-500 hover:bg-zinc-800 transition-colors"
+                className="w-full text-left rounded border border-zinc-700 bg-zinc-900 px-4 py-3 text-xs text-zinc-200 hover:border-zinc-500 hover:bg-zinc-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {opt.description}
               </button>
             ))}
           </div>
 
-          <p className="text-[10px] text-zinc-600 text-center">
-            After selecting a resolution, click Continue above to proceed.
-          </p>
+          {error && (
+            <p className="rounded border border-red-800 bg-red-950/40 px-3 py-2 text-xs text-red-400">
+              {error}
+            </p>
+          )}
+          {submitting && (
+            <p className="text-xs text-zinc-500 text-center animate-pulse">Applying resolution…</p>
+          )}
         </div>
       </div>
     )

@@ -3,4 +3,67 @@
 @theme inline {
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  /* ── Forge palette: warm charcoal replaces cool zinc ──────────────────────── */
+  --color-zinc-950: #0D0B09;
+  --color-zinc-900: #151210;
+  --color-zinc-800: #201C18;
+  --color-zinc-700: #2E2720;
+  --color-zinc-600: #4A4238;
+  --color-zinc-500: #6A5E52;
+  --color-zinc-400: #958478;
+  --color-zinc-300: #C0AF9E;
+  --color-zinc-200: #D8C8B4;
+  --color-zinc-100: #E8D8C4;
+  --color-zinc-50:  #F2EAE0;
+
+  /* ── Amber replaces indigo as the primary accent ──────────────────────────── */
+  --color-indigo-950: #1A1108;
+  --color-indigo-900: #241804;
+  --color-indigo-800: #301E08;
+  --color-indigo-700: #3E280C;
+  --color-indigo-600: #B06810;
+  --color-indigo-500: #C4771C;
+  --color-indigo-400: #D48828;
+  --color-indigo-300: #E0A040;
+  --color-indigo-200: #EABB60;
+
+  /* ── Dual-rail accents: coder (amber) / reviewer (steel) ──────────────────── */
+  --color-coder-950:    #1A1108;
+  --color-coder-900:    #2C1A08;
+  --color-coder-600:    #B06810;
+  --color-coder-400:    #D48828;
+  --color-reviewer-950: #0A1620;
+  --color-reviewer-900: #0E2030;
+  --color-reviewer-600: #4A7898;
+  --color-reviewer-400: #6898B8;
+}
+
+/* ── Base ──────────────────────────────────────────────────────────────────── */
+
+html {
+  background: #0D0B09;
+  color-scheme: dark;
+}
+
+::selection {
+  background: rgb(176 104 16 / 0.28);
+  color: #E8D8C4;
+}
+
+/* ── Scrollbars ────────────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 3px;
+  height: 3px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #2E2720;
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #4A4238;
 }

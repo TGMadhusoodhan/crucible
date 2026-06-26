@@ -55,6 +55,9 @@ export function TaskInputPanel() {
             <label className="mb-1 block text-xs font-medium text-zinc-400">
               What should we build?
             </label>
+            <p className="mb-1.5 text-[10px] text-zinc-600">
+              Describe what it does, who uses it, and any constraints. The models will ask before building.
+            </p>
             <textarea
               value={task}
               onChange={e => setTask(e.target.value)}
@@ -68,9 +71,10 @@ export function TaskInputPanel() {
           <button
             type="button"
             onClick={() => setShow(v => !v)}
-            className="text-xs text-zinc-500 hover:text-zinc-300"
+            className="flex items-center gap-1.5 rounded border border-zinc-700/60 px-3 py-1.5 text-xs text-zinc-500 hover:border-zinc-600 hover:text-zinc-300 transition-colors"
           >
-            {showContext ? '– Hide context' : '+ Add codebase context'}
+            <span>{showContext ? '−' : '+'}</span>
+            <span>{showContext ? 'Hide codebase context' : 'Add codebase context'}</span>
           </button>
 
           {showContext && (

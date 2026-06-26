@@ -59,6 +59,8 @@ const NO_AUTO_RECONNECT = new Set([
   'idle',
   'phase2_answering',
   'phase2_spec_confirm',
+  'phase3_file_gate',
+  'phase3_file_feedback',
   'conflict_escalated',
   'paused',
   'stopped',
@@ -126,6 +128,15 @@ export function usePipeline() {
         break
       case 'consensus':
         dispatch({ type: 'CONSENSUS', output: event.output })
+        break
+      case 'file_ready':
+        dispatch({ type: 'FILE_READY', filename: event.filename, code: event.code, fileIndex: event.fileIndex, totalFiles: event.totalFiles })
+        break
+      case 'file_accepted':
+        dispatch({ type: 'FILE_ACCEPTED', filename: event.filename, code: event.code, fileIndex: event.fileIndex })
+        break
+      case 'files_complete':
+        dispatch({ type: 'FILES_COMPLETE', acceptedFiles: event.acceptedFiles })
         break
       case 'conflict': {
         const review = event.review
@@ -355,6 +366,56 @@ export function usePipeline() {
     }).catch(() => {})
   }, [state.sessionId, dispatch])
 
+  // ─── File gate: accept current file ──────────────────────────────────────
+
+  const acceptFile = useCallback(async (filename: string, code: string) => {
+    if (!state.sessionId) return
+
+    const res = await fetch('/api/pipeline/file-accept', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: state.sessionId, filename, code }),
+    })
+
+    const data = await res.json() as { success: boolean; data?: { fileIndex: number; done: boolean }; error?: string }
+    if (!data.success) throw new Error(data.error ?? 'Failed to accept file')
+
+    // Use server-returned fileIndex as the source of truth to avoid
+    // off-by-one if the user somehow triggers acceptFile twice.
+    dispatch({ type: 'FILE_ACCEPTED', filename, code, fileIndex: (data.data?.fileIndex ?? state.currentFileIndex + 1) - 1 })
+
+    if (data.data?.done) {
+      // All files accepted — reconnect to get files_complete event
+      dispatch({ type: 'FILES_COMPLETE', acceptedFiles: { ...state.acceptedFiles, [filename]: code } })
+    } else {
+      // More files remain — reconnect to get file_ready for next file
+      void connectToStream(state.sessionId)
+    }
+  }, [state.sessionId, state.currentFileIndex, state.acceptedFiles, dispatch, connectToStream])
+
+  // ─── File gate: send feedback for current file ────────────────────────────
+
+  const submitFileFeedback = useCallback(async (
+    filename:  string,
+    code:      string,
+    feedback:  string,
+    modelRole: 'primary' | 'reviewer' = 'primary',
+  ): Promise<{ code: string; modelId: string }> => {
+    if (!state.sessionId) throw new Error('No active session')
+
+    const res = await fetch('/api/pipeline/file-feedback', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: state.sessionId, filename, code, feedback, modelRole }),
+    })
+
+    const data = await res.json() as { success: boolean; data?: { code: string; modelId: string }; error?: string }
+    if (!data.success || !data.data) throw new Error(data.error ?? 'Failed to get file feedback')
+
+    dispatch({ type: 'FILE_FEEDBACK', filename, code: data.data.code })
+    return data.data
+  }, [state.sessionId, dispatch])
+
   // ─── Budget refresh ────────────────────────────────────────────────────────
 
   const refreshBudget = useCallback(async () => {
@@ -385,6 +446,8 @@ export function usePipeline() {
       dispatch({ type: 'ANSWER_QUESTION', questionId, optionId }),
     setProject: (project: ProjectConfig) =>
       dispatch({ type: 'SET_PROJECT', project }),
+    acceptFile,
+    submitFileFeedback,
     resetSession: () => {
       lastPhaseRef.current = 'idle'
       reconnectCountRef.current = 0

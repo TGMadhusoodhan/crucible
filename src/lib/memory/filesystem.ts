@@ -5,10 +5,11 @@ import { estimateTokens } from '@/lib/utils/tokens'
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
 
-const DATA_DIR = process.env.DATA_DIR ?? './data'
+// Read lazily so tests can override DATA_DIR via process.env after module load.
+function getDataDir(): string { return process.env.DATA_DIR ?? './data' }
 
 function projectDir(projectId: string): string {
-  return path.join(DATA_DIR, 'projects', projectId)
+  return path.join(getDataDir(), 'projects', projectId)
 }
 
 function ensureDir(dir: string): void {
@@ -160,27 +161,47 @@ export function readReviewList(projectId: string): ReviewFlag[] {
 // ─── Output files ─────────────────────────────────────────────────────────────
 
 export function writeOutput(projectId: string, filename: string, content: string): void {
-  const dir = path.join(projectDir(projectId), 'output')
-  ensureDir(dir)
-  fs.writeFileSync(path.join(dir, filename), content)
+  const outDir  = path.join(projectDir(projectId), 'output')
+  const fullPath = path.join(outDir, filename)
+  ensureDir(path.dirname(fullPath))   // create any intermediate dirs (e.g. src/app/)
+  fs.writeFileSync(fullPath, content)
 }
 
 export const writeOutputFile = writeOutput
 
 export function readOutputFile(projectId: string, filename: string): string {
-  const file = path.join(projectDir(projectId), 'output', filename)
-  if (!fs.existsSync(file)) throw new Error(`Output file not found: ${filename}`)
-  return fs.readFileSync(file, 'utf8')
+  const outDir   = path.join(projectDir(projectId), 'output')
+  // Prevent path traversal — use sep suffix to avoid '/output2' passing '/output' check
+  const resolved = path.resolve(outDir, filename)
+  const safeBase = path.resolve(outDir) + path.sep
+  if (!resolved.startsWith(safeBase) && resolved !== path.resolve(outDir)) {
+    throw new Error('Invalid filename')
+  }
+  if (!fs.existsSync(resolved)) throw new Error(`Output file not found: ${filename}`)
+  return fs.readFileSync(resolved, 'utf8')
 }
 
 export function listOutputFiles(projectId: string): string[] {
-  const dir = path.join(projectDir(projectId), 'output')
+  const outDir = path.join(projectDir(projectId), 'output')
   try {
-    if (!fs.existsSync(dir)) return []
-    return fs.readdirSync(dir)
+    if (!fs.existsSync(outDir)) return []
+    return readdirRecursive(outDir, outDir)
   } catch {
     return []
   }
+}
+
+function readdirRecursive(baseDir: string, dir: string): string[] {
+  const results: string[] = []
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      results.push(...readdirRecursive(baseDir, full))
+    } else {
+      results.push(path.relative(baseDir, full))
+    }
+  }
+  return results
 }
 
 // ─── Checkpoints ─────────────────────────────────────────────────────────────

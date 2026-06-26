@@ -11,7 +11,7 @@ const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'open
 
 const startSchema = z.object({
   projectId:        z.string().min(1),
-  taskDescription:  z.string().min(1).max(10_000),
+  taskDescription:  z.string().min(1).max(50_000),
   primaryProvider:  z.enum(PROVIDERS),
   primaryModelId:   z.string().min(1).max(200),
   reviewerProvider: z.enum(PROVIDERS),

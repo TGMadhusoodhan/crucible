@@ -1,6 +1,6 @@
 'use client'
 
-import { useRef, useEffect } from 'react'
+import { useRef, useEffect, useState } from 'react'
 import { usePipelineState } from '@/store'
 
 function PhaseStep({ label, active, done }: { label: string; active: boolean; done: boolean }) {
@@ -20,10 +20,19 @@ function PhaseStep({ label, active, done }: { label: string; active: boolean; do
   )
 }
 
+// Extract the last === FILE: path === marker seen so far in the stream
+function detectCurrentFile(code: string): string | null {
+  const match = [...code.matchAll(/=== FILE: (.+?) ===/g)].at(-1)
+  return match ? match[1]!.trim() : null
+}
+
 export function GeneratingPanel({ label }: { label?: string }) {
   const { streamingCode, selfCheckOutput, reviewerEdit, coderVerification, phase, round, project } = usePipelineState()
   const codeEndRef   = useRef<HTMLDivElement>(null)
   const scrollRafRef = useRef<number | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  const currentFile = phase === 'phase3_generating' ? detectCurrentFile(streamingCode) : null
 
   useEffect(() => {
     if (scrollRafRef.current) return
@@ -33,27 +42,45 @@ export function GeneratingPanel({ label }: { label?: string }) {
     })
   }, [streamingCode])
 
+  async function copyCode() {
+    await navigator.clipboard.writeText(streamingCode)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
   const isGenerating    = phase === 'phase3_generating'
   const isSelfCheck     = phase === 'phase3_self_check'
   const isReviewing     = phase === 'phase3_reviewing'
   const isReviewerEdit  = phase === 'phase3_reviewer_edit'
   const isCoderVerify   = phase === 'phase3_coder_verify'
+  const isConsensus     = phase === 'phase3_consensus'
 
   const pastGeneration  = !isGenerating && !!streamingCode
-  const pastReview      = isReviewerEdit || isCoderVerify
-  const pastEdit        = isCoderVerify
+  const pastReview      = isReviewerEdit || isCoderVerify || isConsensus
+  const pastEdit        = isCoderVerify || (isConsensus && !!reviewerEdit)
 
   const headerLabel = label ??
     (isReviewerEdit ? 'Reviewer editing code…' :
      isCoderVerify  ? 'Coder verifying reviewer\'s changes…' :
      isReviewing    ? 'Reviewing…' :
+     currentFile    ? `Generating ${currentFile}…` :
                       `Phase 3 — Code Generation ${round > 1 ? `(round ${round})` : ''}`)
 
   return (
     <div className="flex h-full flex-col">
       {/* Header */}
       <div className="border-b border-zinc-800 px-6 py-3">
-        <h2 className="text-sm font-medium text-zinc-300">{headerLabel}</h2>
+        <div className="flex items-center justify-between gap-4">
+          <h2 className="text-sm font-medium text-zinc-300">{headerLabel}</h2>
+          {streamingCode && (
+            <button
+              onClick={copyCode}
+              className="shrink-0 rounded border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:border-zinc-500 hover:text-zinc-200 transition-colors"
+            >
+              {copied ? '✓ Copied' : 'Copy'}
+            </button>
+          )}
+        </div>
         <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1">
           <PhaseStep
             label={`Generate (${project?.primaryModelId ?? 'primary'})`}
@@ -78,7 +105,7 @@ export function GeneratingPanel({ label }: { label?: string }) {
           <PhaseStep
             label="Coder Verifies"
             active={isCoderVerify}
-            done={!!coderVerification && !isCoderVerify}
+            done={(!!coderVerification && !isCoderVerify) || (isConsensus && !!coderVerification)}
           />
         </div>
       </div>

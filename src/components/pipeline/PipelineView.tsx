@@ -11,6 +11,7 @@ import { GeneratingPanel }  from './GeneratingPanel'
 import { DialoguePanel }    from './DialoguePanel'
 import { ConflictPanel }    from './ConflictPanel'
 import { CompletePanel }    from './CompletePanel'
+import { FileGatePanel }   from './FileGatePanel'
 import { cn } from '@/lib/utils'
 
 const THINKING_SIDEBAR_PHASES = new Set([
@@ -25,6 +26,7 @@ const THINKING_SIDEBAR_PHASES = new Set([
 const PHASE3_LABELS: Partial<Record<string, string>> = {
   phase3_reviewer_edit: 'Reviewer editing…',
   phase3_coder_verify:  'Coder verifying reviewer\'s changes…',
+  phase3_consensus:     'Promoting to output…',
 }
 
 // ─── Phase progress strip ─────────────────────────────────────────────────────
@@ -35,7 +37,8 @@ const PHASES = [
   { label: 'Q&A',      phases: ['phase2_questions', 'phase2_answering', 'phase2_contradictions'] },
   { label: 'Spec',     phases: ['phase2_spec', 'phase2_spec_confirm'] },
   { label: 'Generate', phases: ['phase3_generating', 'phase3_self_check', 'phase3_reviewing'] },
-  { label: 'Verify',   phases: ['phase3_reviewer_edit', 'phase3_coder_verify', 'phase3_dialogue', 'phase3_consensus'] },
+  { label: 'Verify',   phases: ['phase3_reviewer_edit', 'phase3_coder_verify', 'phase3_dialogue', 'phase3_consensus', 'conflict_escalated'] },
+  { label: 'Review',   phases: ['phase3_file_gate', 'phase3_file_feedback'] },
   { label: 'Done',     phases: ['complete'] },
 ]
 
@@ -51,7 +54,7 @@ function ProgressStrip() {
       {PHASES.map((step, i) => {
         const done    = i < currentIdx
         const active  = i === currentIdx
-        const conflict = phase === 'conflict_escalated' && step.label === 'Generate'
+        const conflict = phase === 'conflict_escalated' && step.label === 'Verify'
         return (
           <div key={step.label} className="flex items-center">
             <span className={cn(
@@ -84,7 +87,7 @@ function ControlsBar() {
   const showPause = isStreaming && phase !== 'paused'
   const showPlay  = phase === 'paused'
   const showStop  = phase !== 'complete' && phase !== 'stopped' && phase !== 'idle'
-  const showReset = phase === 'complete' || phase === 'stopped' || phase === 'error'
+  const showReset = phase === 'complete' || phase === 'stopped' || phase === 'error' || phase === 'phase3_file_gate'
 
   if (!showPause && !showPlay && !showStop && !showReset) return null
 
@@ -191,6 +194,10 @@ export function PipelineView() {
 
       case 'phase3_dialogue':
         return <DialoguePanel />
+
+      case 'phase3_file_gate':
+      case 'phase3_file_feedback':
+        return <FileGatePanel />
 
       case 'conflict_escalated':
         return <ConflictPanel />

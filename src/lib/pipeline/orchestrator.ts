@@ -61,7 +61,7 @@ export async function saveSessionState(state: PipelineSessionState): Promise<voi
 
 // ─── Project output (filesystem — survives restarts + Docker volume) ──────────
 
-const DATA_DIR = process.env.DATA_DIR ?? './data'
+const getDataDir = () => process.env.DATA_DIR ?? './data'
 
 export interface StoredProjectOutput {
   output:    ConsensusOutput
@@ -77,7 +77,7 @@ export async function saveProjectOutput(
   spec:      SpecDocument | null,
   sessionId: string,
 ): Promise<void> {
-  const dir  = path.join(DATA_DIR, 'projects', projectId)
+  const dir  = path.join(getDataDir(), 'projects', projectId)
   fs.mkdirSync(dir, { recursive: true })
   const stored: StoredProjectOutput = { output, spec, savedAt: Date.now(), sessionId }
   fs.writeFileSync(path.join(dir, 'output.json'), JSON.stringify(stored, null, 2))
@@ -87,7 +87,7 @@ export async function getProjectOutput(
   _userId:   string,
   projectId: string,
 ): Promise<StoredProjectOutput | null> {
-  const file = path.join(DATA_DIR, 'projects', projectId, 'output.json')
+  const file = path.join(getDataDir(), 'projects', projectId, 'output.json')
   try {
     if (!fs.existsSync(file)) return null
     return JSON.parse(fs.readFileSync(file, 'utf8')) as StoredProjectOutput
@@ -492,6 +492,7 @@ export async function runPipeline(
           state.generatedCode,
         )
         state.generatedCode      = genResult.code
+        state.generatedFiles     = genResult.files
         state.selfCheckOutput    = genResult.selfCheckOutput
         state.reviewerEdit       = undefined
         state.mergedCode         = undefined
@@ -636,13 +637,14 @@ export async function runPipeline(
 
     if (state.phase === 'phase3_consensus') {
       const code   = state.generatedCode!
+      const files  = state.generatedFiles ?? { 'output.txt': code }
       const review = state.lastReview!
 
       let decision: Awaited<ReturnType<typeof runPhase3Consensus>>
       try {
         const syntheticReview: ReviewPayload = { ...review, consensus: true }
         decision = await runPhase3Consensus(
-          projectId, sessionId, code, syntheticReview, ctx, emit,
+          projectId, sessionId, code, files, syntheticReview, ctx, emit,
         )
       } catch (err) {
         await handleError(state, err, emit)
@@ -650,16 +652,47 @@ export async function runPipeline(
       }
 
       if (decision.promote) {
-        state.output = decision.output
+        state.output         = decision.output
+        state.generatedFiles = files
+        state.currentFileIndex = 0
+        // Save output metadata (not the actual files — those go to disk on file-accept)
         saveProjectOutput(state.userId, state.projectId, decision.output!, state.spec ?? null, state.sessionId)
           .catch(err => console.error('[orchestrator] saveProjectOutput failed:', err))
-        state = await transition(state, 'complete')
+        // Transition to file gate — stream closes here, client reconnects after user acts
+        state = await transition(state, 'phase3_file_gate')
         return
       }
 
       state = await transition(state, 'conflict_escalated')
       return
     }
+  }
+
+  // ── File gate — emit file_ready for current file index ─────────────────────
+  // Reached when client reconnects after the user accepts a file and the gate
+  // advances to the next file (or all files are done).
+
+  if (state.phase === 'phase3_file_gate') {
+    const files     = state.generatedFiles ?? {}
+    const filenames = Object.keys(files)
+    const idx       = state.currentFileIndex ?? 0
+
+    if (idx >= filenames.length) {
+      // All files accepted — pipeline is complete
+      emit({ type: 'files_complete', acceptedFiles: files })
+      emit({ type: 'done' })
+      state = await transition(state, 'complete')
+      return
+    }
+
+    // Emit phase_change first so client's lastPhaseRef becomes 'phase3_file_gate'
+    // (in NO_AUTO_RECONNECT) before the stream closes — prevents reconnect loop.
+    emit({ type: 'phase_change', phase: 'phase3_file_gate' })
+    const filename = filenames[idx]!
+    emit({ type: 'file_ready', filename, code: files[filename]!, fileIndex: idx, totalFiles: filenames.length })
+    emit({ type: 'done' })
+    await saveSessionState(state)
+    return
   }
 
   if (state.phase === 'conflict_escalated') return

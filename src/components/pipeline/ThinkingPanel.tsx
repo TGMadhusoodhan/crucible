@@ -19,40 +19,51 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function ModelCard({
-  label, output, compact,
+  label, output, compact, role,
 }: {
   label:   string
   output:  ThinkingOutput | null
   compact: boolean
+  role:    'coder' | 'reviewer'
 }) {
   const [showAssumptions, setShowAssumptions] = useState(false)
   const [expanded, setExpanded]               = useState(!compact)
 
+  const railCls = role === 'coder' ? 'bg-coder-600/70' : 'bg-reviewer-600/60'
+
   return (
     <div className={cn(
-      'rounded-lg border border-zinc-800 bg-zinc-900/60 overflow-hidden',
-      compact ? '' : 'p-4 space-y-3 overflow-y-auto max-h-[520px]',
+      'rounded-lg border border-zinc-800 bg-zinc-900/60 overflow-hidden flex',
+      compact ? '' : 'max-h-[520px]',
     )}>
-      {/* Header — always visible */}
-      <div
-        className={cn('flex items-center gap-2', compact && 'cursor-pointer px-3 py-2 hover:bg-zinc-800/40')}
-        onClick={compact ? () => setExpanded(v => !v) : undefined}
-      >
-        {compact && (
-          <span className="text-[10px] text-zinc-600">{expanded ? '▾' : '▸'}</span>
-        )}
-        <span className="text-xs font-semibold text-zinc-300 truncate">{label}</span>
-        {!output && <PulsingDot />}
-        {output && (
-          <span className="rounded bg-green-900/40 px-1.5 py-0.5 text-[10px] text-green-400 shrink-0">
-            done
-          </span>
-        )}
-      </div>
+      {/* Dual rail — amber for coder, steel blue for reviewer */}
+      <div className={cn('w-0.5 shrink-0', railCls)} />
 
-      {/* Body */}
-      {(!compact || expanded) && (
-        <div className={cn('text-xs', compact ? 'px-3 pb-3 space-y-2' : 'space-y-3')}>
+      {/* Card content */}
+      <div className={cn(
+        'flex-1 min-w-0 overflow-hidden',
+        compact ? '' : 'p-4 space-y-3 overflow-y-auto',
+      )}>
+        {/* Header — always visible */}
+        <div
+          className={cn('flex items-center gap-2', compact && 'cursor-pointer px-3 py-2 hover:bg-zinc-800/40')}
+          onClick={compact ? () => setExpanded(v => !v) : undefined}
+        >
+          {compact && (
+            <span className="text-[10px] text-zinc-600">{expanded ? '▾' : '▸'}</span>
+          )}
+          <span className="text-xs font-semibold text-zinc-300 truncate">{label}</span>
+          {!output && <PulsingDot />}
+          {output && (
+            <span className="rounded bg-green-900/40 px-1.5 py-0.5 text-[10px] text-green-400 shrink-0">
+              done
+            </span>
+          )}
+        </div>
+
+        {/* Body */}
+        {(!compact || expanded) && (
+          <div className={cn('text-xs', compact ? 'px-3 pb-3 space-y-2' : 'space-y-3')}>
           {!output ? (
             <p className="text-zinc-600 italic">Thinking independently…</p>
           ) : (
@@ -123,7 +134,8 @@ function ModelCard({
             </>
           )}
         </div>
-      )}
+        )}
+      </div>
     </div>
   )
 }
@@ -145,11 +157,13 @@ export function ThinkingPanel({ compact = false }: { compact?: boolean }) {
             label={project?.primaryModelId ?? 'Primary'}
             output={thinkingPrimary}
             compact
+            role="coder"
           />
           <ModelCard
             label={project?.reviewerModelId ?? 'Reviewer'}
             output={thinkingReviewer}
             compact
+            role="reviewer"
           />
         </div>
       </div>
@@ -166,8 +180,8 @@ export function ThinkingPanel({ compact = false }: { compact?: boolean }) {
       </div>
 
       <div className="grid grid-cols-2 gap-4 flex-1 min-h-0">
-        <ModelCard label={project?.primaryModelId ?? 'Primary'}  output={thinkingPrimary}  compact={false} />
-        <ModelCard label={project?.reviewerModelId ?? 'Reviewer'} output={thinkingReviewer} compact={false} />
+        <ModelCard label={project?.primaryModelId ?? 'Primary'}  output={thinkingPrimary}  compact={false} role="coder" />
+        <ModelCard label={project?.reviewerModelId ?? 'Reviewer'} output={thinkingReviewer} compact={false} role="reviewer" />
       </div>
 
       {thinkingPrimary && thinkingReviewer && phase === 'phase1_thinking' && (

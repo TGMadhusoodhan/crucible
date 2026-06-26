@@ -258,7 +258,8 @@ export const reviewPayloadSchema = z.object({
 })
 
 export interface ConsensusOutput {
-  code: string
+  code: string                        // raw AI response (may contain file delimiters)
+  files: Record<string, string>       // parsed multi-file map (filename → content)
   review: ReviewPayload
   promoted_at: number
   checkpoint_id: string
@@ -383,6 +384,8 @@ export type PipelinePhase =
   | 'phase3_coder_verify'
   | 'phase3_dialogue'
   | 'phase3_consensus'
+  | 'phase3_file_gate'
+  | 'phase3_file_feedback'
   | 'conflict_escalated'
   | 'complete'
   | 'paused'
@@ -419,6 +422,8 @@ export interface PipelineSessionState {
   contradictions?: Contradiction[]
   spec?: SpecDocument
   generatedCode?: string
+  generatedFiles?: Record<string, string>   // parsed from generatedCode after consensus
+  currentFileIndex?: number                 // index of file currently at gate (0-based)
   selfCheckOutput?: SelfCheckOutput
   lastReview?: ReviewPayload
   reviewerEdit?: ReviewEdit
@@ -579,6 +584,9 @@ export type SSEEvent =
   | { type: 'self_check_done'; output: SelfCheckOutput }
   | { type: 'review_done';     review: ReviewPayload }
   | { type: 'consensus';       output: ConsensusOutput }
+  | { type: 'file_ready';     filename: string; code: string; fileIndex: number; totalFiles: number }
+  | { type: 'file_accepted';  filename: string; code: string; fileIndex: number }
+  | { type: 'files_complete'; acceptedFiles: Record<string, string> }
   | { type: 'conflict';            review: ReviewPayload; round: number }
   | { type: 'reviewer_edit_done';  edit: ReviewEdit }
   | { type: 'coder_verify_done';   verification: CoderVerification }

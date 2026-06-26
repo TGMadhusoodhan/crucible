@@ -8,6 +8,8 @@ export function DialoguePanel() {
 
   const coderLabel    = project?.primaryModelId  ?? 'Coder'
   const reviewerLabel = project?.reviewerModelId ?? 'Reviewer'
+  const coderAvatar    = coderLabel.slice(0, 6)
+  const reviewerAvatar = reviewerLabel.slice(0, 6)
 
   const isActive = phase === 'phase3_dialogue'
 
@@ -51,22 +53,26 @@ export function DialoguePanel() {
                   'shrink-0 rounded px-1.5 py-0.5 text-[9px] font-mono font-medium self-start mt-0.5',
                   isCoder ? 'bg-indigo-900/60 text-indigo-400' : 'bg-emerald-900/60 text-emerald-400',
                 )}>
-                  {isCoder ? 'C' : 'R'}
+                  {isCoder ? coderAvatar : reviewerAvatar}
                 </div>
 
                 {/* Bubble */}
                 <div className={cn(
-                  'max-w-[80%] rounded-lg px-3 py-2 space-y-1',
+                  'max-w-[80%] rounded-lg overflow-hidden',
                   isCoder ? 'bg-zinc-800/60' : 'bg-zinc-900/80 border border-zinc-800',
                 )}>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] font-medium text-zinc-400">{label}</span>
-                    <span className="text-[9px] text-zinc-700">Round {msg.round}</span>
-                    {isResolved && <span className="text-[9px] text-green-500">✓ Resolved</span>}
+                  {/* Top rail */}
+                  <div className={cn('h-0.5', isCoder ? 'bg-coder-600/60' : 'bg-reviewer-600/50')} />
+                  <div className="px-3 py-2 space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-medium text-zinc-400">{label}</span>
+                      <span className="text-[9px] text-zinc-700">Round {msg.round}</span>
+                      {isResolved && <span className="text-[9px] text-green-500">✓ Resolved</span>}
+                    </div>
+                    <p className="text-xs text-zinc-300 leading-relaxed whitespace-pre-wrap">
+                      {msg.content}
+                    </p>
                   </div>
-                  <p className="text-xs text-zinc-300 leading-relaxed whitespace-pre-wrap">
-                    {msg.content}
-                  </p>
                 </div>
               </div>
             )

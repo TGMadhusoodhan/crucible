@@ -1,4 +1,4 @@
-import { writeOutput, saveCheckpoint } from '@/lib/memory/filesystem'
+import { saveCheckpoint } from '@/lib/memory/filesystem'
 import { logOutputPromoted } from '@/lib/memory/session-log'
 import { generateId } from '@/lib/utils'
 import type { ConsensusOutput, PipelineContext, ReviewPayload, SSEEvent } from '@/types'
@@ -14,7 +14,9 @@ export interface ConsensusDecision {
 /**
  * Phase 3 — Consensus routing.
  *
- * consensus: true  → promote code to output layer, save checkpoint, done.
+ * consensus: true  → save checkpoint, emit file_ready for first file, pause at file gate.
+ *                    Files are NOT written to disk here — that happens in file-accept route
+ *                    after the user reviews and approves each file.
  * consensus: false → return { promote: false, escalate: false }.
  *                    The reviewer's flags go back to the coder as PATCH MODE instructions.
  *                    No round limit — loops until the reviewer gives consensus: true.
@@ -23,6 +25,7 @@ export async function runPhase3Consensus(
   projectId: string,
   sessionId: string,
   code:      string,
+  files:     Record<string, string>,
   review:    ReviewPayload,
   ctx:       PipelineContext,
   emit:      (event: SSEEvent) => void,
@@ -36,22 +39,33 @@ export async function runPhase3Consensus(
       projectId,
       'module_complete',
       `Consensus reached on round ${review.round}`,
-      { 'output.txt': code },
+      files,
     )
-
-    // Write consensus-validated code to the output layer
-    await writeOutput(projectId, 'output.txt', code)
 
     await logOutputPromoted(projectId, sessionId, checkpointId)
 
     const output: ConsensusOutput = {
       code,
+      files,
       review,
       promoted_at:   Date.now(),
       checkpoint_id: checkpointId,
     }
 
+    // Emit consensus (client stores output + files in state)
     emit({ type: 'consensus', output })
+
+    // Transition to file gate — emit phase_change BEFORE file_ready so
+    // lastPhaseRef on the client is set to 'phase3_file_gate' (which is in
+    // NO_AUTO_RECONNECT) before the stream closes. Without this the client
+    // would see lastPhaseRef='phase3_consensus' and auto-reconnect in a loop.
+    emit({ type: 'phase_change', phase: 'phase3_file_gate' })
+
+    const filenames = Object.keys(files)
+    if (filenames.length > 0) {
+      emit({ type: 'file_ready', filename: filenames[0]!, code: files[filenames[0]!]!, fileIndex: 0, totalFiles: filenames.length })
+    }
+
     emit({ type: 'done' })
 
     return { promote: true, escalate: false, output }
@@ -75,6 +89,7 @@ export async function promoteAfterHumanResolution(
   projectId: string,
   sessionId: string,
   code:      string,
+  files:     Record<string, string>,
   review:    ReviewPayload,
   emit:      (event: SSEEvent) => void,
 ): Promise<ConsensusOutput> {
@@ -84,20 +99,26 @@ export async function promoteAfterHumanResolution(
     projectId,
     'human_confirm',
     'Human resolved conflict and approved code',
-    { 'output.txt': code },
+    files,
   )
 
-  await writeOutput(projectId, 'output.txt', code)
   await logOutputPromoted(projectId, sessionId, checkpointId)
 
   const output: ConsensusOutput = {
     code,
+    files,
     review,
     promoted_at:   Date.now(),
     checkpoint_id: checkpointId,
   }
 
   emit({ type: 'consensus', output })
+
+  const filenames = Object.keys(files)
+  if (filenames.length > 0) {
+    emit({ type: 'file_ready', filename: filenames[0]!, code: files[filenames[0]!]!, fileIndex: 0, totalFiles: filenames.length })
+  }
+
   emit({ type: 'done' })
 
   return output

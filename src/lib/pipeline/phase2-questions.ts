@@ -87,7 +87,11 @@ export async function runPhase2Questions(
   ]
 
   const deduped = deduplicateQuestions(combined)
-  const final   = sortByCategory(deduped)
+  const sorted  = sortByCategory(deduped)
+
+  // Reassign IDs after merge+dedup+sort — both models start from q1/q2/q3 so the
+  // same ID can appear from different sources even after text-based deduplication.
+  const final = sorted.map((q, i) => ({ ...q, id: `q${i + 1}` }))
 
   await logQuestionsReady(projectId, sessionId, final)
   emit({ type: 'questions_ready', questions: final })

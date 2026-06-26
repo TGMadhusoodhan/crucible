@@ -7,8 +7,8 @@ import { cn } from '@/lib/utils'
 
 const STATUS_DOT: Record<string, string> = {
   idle:             'bg-zinc-600',
-  running:          'bg-blue-400 animate-pulse',
-  paused:           'bg-yellow-400',
+  running:          'bg-indigo-400 animate-pulse',
+  paused:           'bg-yellow-500',
   waiting_conflict: 'bg-orange-400 animate-pulse',
   stopped:          'bg-red-500',
 }
@@ -39,9 +39,10 @@ export function AppNav() {
   return (
     <header className="flex h-12 shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4">
       {/* Brand */}
-      <Link href="/dashboard" className="flex shrink-0 items-center gap-2">
-        <span className="text-sm font-bold tracking-tight text-zinc-100">Crucible</span>
-        <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500 font-mono">beta</span>
+      <Link href="/dashboard" className="flex shrink-0 items-center gap-2.5">
+        <span className="h-4 w-0.5 rounded-full bg-indigo-500" />
+        <span className="font-mono text-sm font-semibold tracking-tight text-zinc-100">Crucible</span>
+        <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500">beta</span>
       </Link>
 
       {/* Active project indicator */}
@@ -62,6 +63,7 @@ export function AppNav() {
       {/* Nav links */}
       <nav className="flex shrink-0 items-center gap-1">
         <NavLink href="/dashboard" active={pathname === '/dashboard'}>Pipeline</NavLink>
+        <NavLink href="/files"     active={pathname === '/files'}>Files</NavLink>
         <NavLink href="/settings"  active={pathname === '/settings'}>
           <span className="flex items-center gap-1">
             <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
@@ -71,7 +73,7 @@ export function AppNav() {
             API Keys
           </span>
         </NavLink>
-        <span className="text-[10px] text-zinc-600 px-2 font-mono">local</span>
+        <span className="rounded border border-zinc-800 px-2 py-0.5 font-mono text-[10px] text-zinc-600">local</span>
       </nav>
     </header>
   )

@@ -165,10 +165,29 @@ async function runSelfCheckPass(
   return { code: patchedCode, output: selfCheckOutput }
 }
 
+// ─── Multi-file output parser ─────────────────────────────────────────────────
+
+// Parses === FILE: path === ... === /FILE === delimiters from AI output.
+// Falls back to { 'output.txt': raw } if no delimiters are found (single-file task).
+export function parseMultiFileOutput(raw: string): Record<string, string> {
+  const files: Record<string, string> = {}
+  // Accept both LF and CRLF line endings — AI models on Windows or Azure may output CRLF.
+  // trim() on filename strips any trailing \r from CRLF sequences.
+  const pattern = /=== FILE: (.+?) ===\r?\n([\s\S]*?)=== \/FILE ===/g
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(raw)) !== null) {
+    const filename = match[1].trim()
+    const content  = match[2]
+    if (filename) files[filename] = content
+  }
+  return Object.keys(files).length > 0 ? files : { 'output.txt': raw }
+}
+
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
 export interface Phase3GenerateResult {
   code:            string
+  files:           Record<string, string>
   selfCheckOutput: SelfCheckOutput
   tokensOut:       number
   costUsd:         number
@@ -230,5 +249,6 @@ export async function runPhase3Generate(
     selfCheckOutput = pass2.output
   }
 
-  return { code, selfCheckOutput, tokensOut, costUsd }
+  const files = parseMultiFileOutput(code)
+  return { code, files, selfCheckOutput, tokensOut, costUsd }
 }

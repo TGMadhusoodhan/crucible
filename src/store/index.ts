@@ -64,6 +64,14 @@ export interface PipelineState {
   // Output (consensus-validated)
   output:           ConsensusOutput | null
 
+  // Multi-file gate state
+  generatedFiles:   Record<string, string>    // all files parsed after consensus
+  currentFileIndex: number                    // which file is at the gate
+  totalFiles:       number
+  currentFilename:  string | null
+  currentFileCode:  string | null
+  acceptedFiles:    Record<string, string>    // accepted by user (shown in Files section)
+
   // Conflict escalation
   conflictReason:   string | null
 
@@ -92,6 +100,12 @@ const initialState: PipelineState = {
   coderVerification: null,
   dialogue:          null,
   output:            null,
+  generatedFiles:    {},
+  currentFileIndex:  0,
+  totalFiles:        0,
+  currentFilename:   null,
+  currentFileCode:   null,
+  acceptedFiles:     {},
   conflictReason:    null,
   isStreaming:       false,
   budget:            null,
@@ -115,6 +129,10 @@ export type PipelineAction =
   | { type: 'SELF_CHECK_DONE';    output: SelfCheckOutput }
   | { type: 'REVIEW_DONE';        review: ReviewPayload }
   | { type: 'CONSENSUS';          output: ConsensusOutput }
+  | { type: 'FILE_READY';         filename: string; code: string; fileIndex: number; totalFiles: number }
+  | { type: 'FILE_ACCEPTED';      filename: string; code: string; fileIndex: number }
+  | { type: 'FILE_FEEDBACK';      filename: string; code: string }
+  | { type: 'FILES_COMPLETE';     acceptedFiles: Record<string, string> }
   | { type: 'CONFLICT_ESCALATED'; review: ReviewPayload; round: number; reason: string }
   | { type: 'REVIEWER_EDIT_DONE'; edit: ReviewEdit }
   | { type: 'CODER_VERIFY_DONE';  verification: CoderVerification }
@@ -193,7 +211,52 @@ function reducer(state: PipelineState, action: PipelineAction): PipelineState {
       return { ...state, lastReview: action.review }
 
     case 'CONSENSUS':
-      return { ...state, output: action.output, phase: 'complete', isStreaming: false }
+      return {
+        ...state,
+        output:           action.output,
+        generatedFiles:   action.output.files,
+        phase:            'phase3_file_gate',
+        isStreaming:      false,
+      }
+
+    case 'FILE_READY':
+      return {
+        ...state,
+        phase:            'phase3_file_gate',
+        currentFileIndex: action.fileIndex,
+        totalFiles:       action.totalFiles,
+        currentFilename:  action.filename,
+        currentFileCode:  action.code,
+        isStreaming:      false,
+      }
+
+    case 'FILE_FEEDBACK':
+      return {
+        ...state,
+        currentFileCode: action.code,
+        phase:           'phase3_file_gate',
+        // Also update generatedFiles so the in-memory client copy reflects the
+        // server's updated file — prevents stale data if the user navigates away.
+        generatedFiles: action.filename
+          ? { ...state.generatedFiles, [action.filename]: action.code }
+          : state.generatedFiles,
+      }
+
+    case 'FILE_ACCEPTED':
+      return {
+        ...state,
+        acceptedFiles: { ...state.acceptedFiles, [action.filename]: action.code },
+        currentFileIndex: action.fileIndex + 1,
+        isStreaming: false,
+      }
+
+    case 'FILES_COMPLETE':
+      return {
+        ...state,
+        acceptedFiles: action.acceptedFiles,
+        phase:         'complete',
+        isStreaming:   false,
+      }
 
     case 'CONFLICT_ESCALATED':
       return {
@@ -255,12 +318,16 @@ function reducer(state: PipelineState, action: PipelineAction): PipelineState {
     case 'RESTORE_SESSION':
       return {
         ...initialState,
-        project:     state.project,
-        budget:      state.budget,
-        phase:       'complete',
-        output:      action.output,
-        spec:        action.spec,
-        isStreaming: false,
+        project:        state.project,
+        budget:         state.budget,
+        phase:          'complete',
+        output:         action.output,
+        spec:           action.spec,
+        // Populate generatedFiles and acceptedFiles from restored output so
+        // the Files section and CompletePanel show the correct file list.
+        generatedFiles: action.output.files ?? {},
+        acceptedFiles:  action.output.files ?? {},
+        isStreaming:    false,
       }
 
     default:

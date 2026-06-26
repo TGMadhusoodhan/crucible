@@ -8,7 +8,7 @@ import { cn } from '@/lib/utils'
 type Choice = 'coder' | 'reviewer' | 'custom'
 
 export function ConflictPanel() {
-  const { lastReview, conflictReason, round, dialogue } = usePipelineState()
+  const { lastReview, conflictReason, round, dialogue, project } = usePipelineState()
   const { resolveConflict } = usePipeline()
 
   const [choice, setChoice]   = useState<Choice | null>(null)
@@ -106,7 +106,9 @@ export function ConflictPanel() {
             <div className="min-w-0">
               <p className="text-xs font-medium text-zinc-200">
                 Follow Coder&apos;s approach
-                <span className="ml-1.5 rounded bg-zinc-800 px-1 text-[10px] text-zinc-500">{lastReview?.round ?? '—'} rounds</span>
+                {project?.primaryModelId && (
+                  <span className="ml-1.5 rounded bg-zinc-800 px-1 text-[10px] text-zinc-500">{project.primaryModelId}</span>
+                )}
               </p>
               {coderPosition ? (
                 <p className="mt-1 text-[10px] text-zinc-500 leading-relaxed line-clamp-3">{coderPosition}</p>
@@ -130,7 +132,12 @@ export function ConflictPanel() {
               onChange={() => setChoice('reviewer')}
             />
             <div className="min-w-0">
-              <p className="text-xs font-medium text-zinc-200">Follow Reviewer&apos;s approach</p>
+              <p className="text-xs font-medium text-zinc-200">
+                Follow Reviewer&apos;s approach
+                {project?.reviewerModelId && (
+                  <span className="ml-1.5 rounded bg-zinc-800 px-1 text-[10px] text-zinc-500">{project.reviewerModelId}</span>
+                )}
+              </p>
               {reviewerPosition ? (
                 <p className="mt-1 text-[10px] text-zinc-500 leading-relaxed line-clamp-3">{reviewerPosition}</p>
               ) : (

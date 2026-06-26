@@ -170,7 +170,7 @@ export abstract class OpenAICompatibleAdapter extends BaseAdapter {
     try {
       const stream = await this.client.chat.completions.create({
         model:      this.modelId,
-        max_tokens: 32768,
+        max_tokens: 16384,
         stream:     true,
         messages,
       })
