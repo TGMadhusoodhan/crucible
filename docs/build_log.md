@@ -476,3 +476,134 @@ tsconfig.json: added test-logic.mts to exclude list
 
 ### Left Off At
 - TypeScript: zero errors. All pipeline runs now work cross-platform (Vercel, mobile, Windows, Mac, any browser).
+
+---
+
+## Session 2026-06-27
+
+### Completed
+- Hybrid local+online generation architecture — type foundation only (no runtime changes)
+
+### Files Modified
+- src/types/index.ts — added 'ollama' to Provider, GenerationMode type, FileDefinition/FileManifest interfaces + fileManifestSchema, updated PipelineConfig (generationMode + localModelId/localEndpoint fields), added fileManifest/generatingFileIdx/generatingFilename to PipelineSessionState, added 'phase3_scaffold' to PipelinePhase, added scaffold_ready/file_generating SSEEvents, added scaffold() to ModelAdapter interface
+- src/store/index.ts — added FileManifest import, fileManifest/generatingFileIdx/generatingFilename to PipelineState + initialState, SCAFFOLD_READY/FILE_GENERATING actions + reducer cases
+- src/hooks/usePipeline.ts — added scaffold_ready/file_generating cases to handleSSEEvent
+- src/lib/adapters/base.ts — added concrete scaffold() stub to BaseAdapter (throws not-implemented), added phase3_scaffold to phaseLabel()
+- src/lib/adapters/index.ts — added OllamaAdapter (extends OpenAICompatibleAdapter, localhost:11434), added 'ollama' case to getAdapter()
+- src/app/api/pipeline/start/route.ts — added generationMode: 'api_only' default to createSession config
+- src/app/api/credentials/route.ts — added ollama to validateApiKey configs
+- src/app/api/models/[provider]/route.ts — added ollama to MODEL_ENDPOINTS
+- src/components/shared/BudgetBar.tsx — added ollama to PROVIDER_LABELS
+- src/components/shared/BudgetSettings.tsx — added ollama to PROVIDER_LABELS
+- src/components/shared/CredentialsManager.tsx — added ollama to PROVIDER_LABELS
+- src/components/shared/ProjectNavigator.tsx — added ollama to PROVIDER_MODELS
+
+### Decisions Made
+- scaffold() in BaseAdapter is a concrete stub (throws) not abstract — avoids forcing all 8 existing adapters to implement a method that only online-primary adapters will use in hybrid mode
+- OllamaAdapter extends OpenAICompatibleAdapter — Ollama's /v1 API is OpenAI-compatible; apiKey field carries endpoint URL for flexibility
+- generationMode defaults to 'api_only' at the API route layer; hybrid mode wiring deferred to Prompt 4
+
+### Left Off At
+- Type foundation complete. TypeScript: zero errors.
+- NEXT: Prompt 2 — scaffold() implementation in online adapters + phase3_scaffold in orchestrator
+
+---
+
+## Session 2026-06-28
+
+### Completed
+- Prompt 2 — BaseAdapter.scaffold() implementation + phase3-scaffold.ts phase runner
+- Prompt 3 — OllamaAdapter, getAdapter endpoint param, phase3-generate.ts per-file hybrid loop
+
+### Files Created
+- src/lib/adapters/ollama.ts — OllamaAdapter (extends OpenAICompatibleAdapter, estimateCost=0)
+- src/lib/pipeline/phase3-scaffold.ts — runPhase3Scaffold() phase runner
+
+### Files Modified
+- src/lib/adapters/base.ts — added SCAFFOLD_SYSTEM_PROMPT, callTextCompletion() hook, full scaffold() impl, FileManifest imports
+- src/lib/adapters/index.ts — import OllamaAdapter from ./ollama (removed inline), added optional endpoint? 4th param to getAdapter
+- src/lib/pipeline/phase3-generate.ts — full rewrite: primary→generator, checker param, manifest-driven per-file PATH B loop, buildPerFilePrompt, runPerFileSelfCheck
+
+### Decisions Made
+- callTextCompletion() is a protected concrete method in BaseAdapter (throws by default); concrete adapters override it in Prompt 4 to enable scaffold()
+- getAdapter endpoint? falls back to apiKey then default localhost — backward compatible with 3-arg callers
+- phase3-generate signature: checker? is optional (not required) so orchestrator's existing (pid,sid,round,ctx,primary,emit,undefined,code) call compiles without change
+- PATH B (hybrid) escalates only the FAILING file to the online checker — other files keep their locally generated code
+
+### Ollama Setup
+- Installed to ~/.local/bin/ollama v0.30.11
+- Server running at http://localhost:11434
+- qwen2.5-coder:7b (4.7GB) pulled and verified
+
+### Left Off At
+- TypeScript: zero errors on all changes.
+- NEXT: Prompt 4 — orchestrator wiring (callTextCompletion in adapters, scaffold phase in runPipeline, hybrid mode routing)
+
+---
+
+## Session 2026-06-28 (continued — Prompt 4)
+
+### Completed
+- Prompt 4 — full hybrid mode wiring, end to end
+
+### Files Modified
+- src/lib/adapters/claude.ts — added callTextCompletion() (uses this.client.messages.create); scaffold() now works for all Anthropic models
+- src/lib/adapters/openai-compatible.ts — added callTextCompletion() (uses this.client.chat.completions.create); OllamaAdapter inherits it automatically
+- src/components/shared/ProjectNavigator.tsx — added generation mode pill toggle + hybrid inputs (local model ID, Ollama endpoint, pull hint) in NewProjectModal
+- src/components/pipeline/GeneratingPanel.tsx — added phase3_scaffold spinner view, per-file progress strip (done/current/pending pills), header label for hybrid phases; scaffold view replaces code panel entirely during planning
+- CLAUDE.md — Prompt 4 status updated to DONE with full detail
+- README.md — hybrid setup step 3 corrected (now says "when creating a project"); added note about scaffold view + per-file progress strip
+
+### Decisions Made
+- callTextCompletion() added to ClaudeAdapter and OpenAICompatibleAdapter as protected concrete methods — no override keyword (noImplicitOverride not set, consistent with rest of codebase)
+- OllamaAdapter inherits callTextCompletion() from OpenAICompatibleAdapter — zero additional code needed in ollama.ts
+- Hybrid mode UI lives in NewProjectModal (not a separate project settings page) — consistent with the constraint that generationMode is not stored in the DB projects table
+- Per-file progress strip renders only when fileManifest is present — api_only mode renders exactly as before with no visual change
+
+### Left Off At
+- Hybrid mode architecture complete: Prompts 1–4 all DONE.
+- TypeScript: zero errors.
+- NEXT: smoke test or next feature
+
+---
+
+## Session 2026-07-03
+
+### Completed
+- Code review of entire uncommitted diff (Prompts 1–4 batch)
+- **Removed hybrid / Ollama mode completely** — user decision
+- Applied critical/high code review fixes
+
+### Files Deleted
+- `src/lib/adapters/ollama.ts` — OllamaAdapter removed
+- `src/lib/pipeline/phase3-scaffold.ts` — scaffold phase removed
+- `src/lib/pipeline/phase3-coder-fix.ts` — coder-fix removed; orchestrator reverts to runPhase3ReviewerEdit
+- `src/app/api/pipeline/accept/route.ts` — dead 410 stub
+- `src/app/api/pipeline/clear-conflict/route.ts` — dead 410 stub
+
+### Files Modified
+- `src/lib/debug.ts` — added `process.env.NODE_ENV !== 'production'` guard; CRUCIBLE_DEBUG=1 enables in prod
+- `src/types/index.ts` — removed GenerationMode, FileManifest, FileDefinition, fileManifestSchema, scaffold()/coderFix() from ModelAdapter, phase3_scaffold from PipelinePhase, scaffold_ready/file_generating from SSEEvent, fileManifest/generatingFileIdx/generatingFilename from PipelineSessionState, generationMode/localModelId/localEndpoint from PipelineConfig, ollama from Provider
+- `src/lib/adapters/base.ts` — removed SCAFFOLD_SYSTEM_PROMPT, CODER_FIX_SYSTEM_PROMPT, buildCoderFixPrompt, callTextCompletion hook, scaffold(), coderFix() from BaseAdapter; FileManifest import removed
+- `src/lib/adapters/index.ts` — removed OllamaAdapter, endpoint? param, 'ollama' case
+- `src/lib/adapters/claude.ts` — removed callTextCompletion()
+- `src/lib/adapters/openai-compatible.ts` — removed callTextCompletion()
+- `src/lib/pipeline/orchestrator.ts` — removed hybrid wiring, scaffold phase, reverted to runPhase3ReviewerEdit, simplified runPhase3Generate call, removed canHybrid from confirmSpec
+- `src/lib/pipeline/phase3-generate.ts` — removed PATH B (per-file loop), removed generator/checker split, removed buildPerFilePrompt/runPerFileSelfCheck, clean single-adapter signature
+- `src/app/api/pipeline/start/route.ts` — removed generationMode/localModelId/localEndpoint from schema
+- `src/app/api/credentials/route.ts`, `src/app/api/models/[provider]/route.ts` — removed ollama entries
+- `src/components/shared/BudgetBar.tsx`, `BudgetSettings.tsx`, `CredentialsManager.tsx` — removed ollama from PROVIDER_LABELS
+- `src/components/shared/ProjectNavigator.tsx` — removed ollama from PROVIDER_MODELS, removed generationMode state, removed hybrid UI block
+- `src/components/pipeline/GeneratingPanel.tsx` — removed scaffold view, per-file progress strip, isScaffold logic, fileManifest/generatingFilename references
+- `src/store/index.ts` — removed FileManifest import, fileManifest/generatingFileIdx/generatingFilename from state, SCAFFOLD_READY/FILE_GENERATING actions
+- `src/hooks/usePipeline.ts` — removed scaffold_ready/file_generating handlers, removed hybrid fields from startPipeline body
+
+### Decisions Made
+- Hybrid/Ollama mode removed — user decision; not needed for V1
+- Reverted orchestrator to use runPhase3ReviewerEdit (reviewer produces hunks) instead of runPhase3CoderFix
+- debug.ts kept (production-gated with CRUCIBLE_DEBUG=1 override)
+- phase3-reviewer-edit.ts kept as the edit mechanism
+
+### Left Off At
+- TypeScript: zero source errors
+- All hybrid code eliminated from codebase

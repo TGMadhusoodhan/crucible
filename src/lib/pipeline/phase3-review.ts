@@ -2,6 +2,7 @@ import { appendReviewList } from '@/lib/memory/filesystem'
 import { logPhaseStart, logReview } from '@/lib/memory/session-log'
 import { retryWithTimeout, TIMEOUT_REVIEW_MS } from '@/lib/utils/retry'
 import { estimateTokens } from '@/lib/utils/tokens'
+import { dbg } from '@/lib/debug'
 import type { ModelAdapter, PipelineContext, ReviewPayload, SSEEvent } from '@/types'
 
 /**
@@ -27,11 +28,25 @@ export async function runPhase3Review(
 ): Promise<ReviewPayload> {
   await logPhaseStart(projectId, sessionId, 'phase3_reviewing', `Phase 3: Review (round ${round})`)
   emit({ type: 'phase_change', phase: 'phase3_reviewing' })
+  dbg.review(`calling reviewer.review()`, {
+    reviewer: `${reviewer.getProvider()}:${reviewer.getModelId()}`,
+    round,
+    codeLen:  code.length,
+  })
 
   const review = await retryWithTimeout(
     () => reviewer.review(code, ctx.spec, round, previousReview),
     { timeoutMs: TIMEOUT_REVIEW_MS, label: `phase3:review:round${round}` },
   )
+  dbg.review('review received', {
+    round,
+    consensus: review.consensus,
+    flags:     review.flags.length,
+    high:      review.flags.filter(f => f.severity === 'HIGH').length,
+    medium:    review.flags.filter(f => f.severity === 'MEDIUM').length,
+    low:       review.flags.filter(f => f.severity === 'LOW').length,
+    reasoning: review.reasoning.slice(0, 120),
+  })
 
   // ─── Route LOW flags to review_list (informational archive) ──────────────────
 

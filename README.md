@@ -8,22 +8,34 @@ You bring your own API keys. Crucible is the pipeline.
 
 ---
 
+## Why two models?
+
+Every model has blind spots baked in by its training data. The same model that wrote the bug is the one you're asking to find it. Crucible breaks that loop:
+
+- DeepSeek writes the code. Claude reviews it. Different companies, different training — genuine cross-validation.
+- The reviewer never rewrites. It flags issues and produces surgical edits; the coder evaluates each one.
+- When they disagree, they negotiate. When they can't resolve it, you decide.
+
+The result: code that has been written, self-checked, independently reviewed, and disputed before it reaches you.
+
+---
+
 ## Features
 
-- **Pre-generation planning** — Both models analyze your task and surface every ambiguous decision before writing a single line of code
-- **Cross-model review** — DeepSeek and Claude (or any two providers) have different training blind spots; what one misses the other catches
-- **Surgical reviewer edits** — The reviewer produces specific code hunks, not a full rewrite; the coder verifies each change
-- **Model dialogue** — When models disagree, they negotiate (up to 3 rounds) before escalating to you
-- **Per-file gate** — You review each generated file individually and can request targeted changes before accepting
-- **Human arbitration** — When models can't resolve a conflict, both positions are presented clearly and your decision is final
-- **Budget governor** — Per-provider spend caps with four operating modes so a heavy session doesn't exhaust your monthly budget
-- **Bring any model** — DeepSeek, Claude, GPT, Gemini, Mistral, OpenRouter, Groq, Together AI — one adapter per provider, zero pipeline changes
+- **Two-model planning** — Both models analyze your task in parallel and surface every ambiguous design decision before writing a line of code
+- **Cross-model code review** — Reviewer flags are structured JSON: severity, location, and a plain-English fix hint — never a full rewrite
+- **Surgical edits** — Reviewer produces exact code hunks; coder verifies each change individually
+- **Model dialogue** — Disagreements trigger a negotiation (up to 3 rounds) before escalating to you
+- **Per-file gate** — You review each generated file one at a time, request targeted changes, and accept when satisfied
+- **Human arbitration** — Unresolved conflicts surface both positions clearly. Your decision is final and injected directly into the pipeline
+- **Budget governor** — Per-provider spend caps with automatic mode switching so one heavy session can't exhaust your budget
+- **Any two providers** — DeepSeek, Claude, GPT, Gemini, Mistral, OpenRouter, Groq, Together AI — mix and match freely
 
 ---
 
 ## Quick start
 
-### 1. Install
+### 1. Clone and install
 
 ```bash
 git clone https://github.com/your-org/crucible
@@ -31,106 +43,108 @@ cd crucible
 npm install
 ```
 
-### 2. Set environment variables
+### 2. Set your encryption key
 
 ```bash
-cp .env.local.example .env.local
+cp .env.example .env.local
+echo "ENCRYPTION_KEY=$(openssl rand -hex 32)" >> .env.local
 ```
 
-Open `.env.local` and fill in at minimum:
+> **Important:** Never change `ENCRYPTION_KEY` after the first run. All API keys you store are encrypted with it. If it changes, they become unreadable and must be re-entered.
 
-```bash
-NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_...
-CLERK_SECRET_KEY=sk_...
-DATABASE_URL=postgresql://...
-ENCRYPTION_KEY=                        # openssl rand -hex 32
-NEXT_PUBLIC_APP_URL=http://localhost:3000
-```
+No external database, cache, or auth service is required. SQLite creates itself on first start.
 
-### 3. Run migrations
-
-```bash
-npx drizzle-kit push
-```
-
-### 4. Start the app
+### 3. Start the app
 
 ```bash
 npm run dev
 ```
 
-Open `http://localhost:3000`, sign in, add your API keys under **Settings**, create a project, and describe your task.
+Open [http://localhost:3000](http://localhost:3000).
+
+### 4. Add API keys and create a project
+
+1. Go to **Settings → API Keys** and add keys for at least two providers
+2. Click **New project** and choose your primary coder and reviewer models
+3. Describe your task and click **Start pipeline**
+
+The pipeline runs automatically until it needs your input (answering questions, confirming the spec, reviewing files). You'll see exactly what each model produced at every step.
+
+**Recommended first pairing:** DeepSeek V4 Pro (primary) + Claude Sonnet 4.6 (reviewer). Different training families, genuine blind spot coverage, and ~36M tokens for $25/month vs Claude Pro's 1–2M.
 
 ---
 
-## Running with Docker (recommended for self-hosting)
+## Running with Docker
 
-Project output is persisted to a named Docker volume — it survives container restarts.
+Docker is recommended for self-hosting — project output persists across container restarts in a named volume.
 
 ```bash
-cp .env.local.example .env
-# Fill in .env, then:
+cp .env.example .env
+# Add ENCRYPTION_KEY to .env, then:
 docker compose up -d
 ```
 
-To view logs:
+View logs:
 
 ```bash
 docker compose logs -f
 ```
 
-The container writes all project data to `/data` (mounted as the `crucible_data` volume). To back up generated files, copy the volume contents.
+All project data is written to `/data` inside the container, mounted as the `crucible_data` volume.
 
 ---
 
 ## How the pipeline works
 
-Crucible runs through four phases before delivering code. No code is generated until Phase 2 is complete.
+Crucible runs through four phases. You only provide input at the marked gates — everything else runs automatically.
 
 ```
-[Phase 1 — Think]
-Both models analyze your task independently in parallel.
-Each produces structured assumptions, questions, and a recommended approach.
+Phase 1 — Think
+  Both models analyze your task independently in parallel.
+  Each produces assumptions, questions, and a recommended approach.
 
-[Phase 1.5 — Align]
-Models share their interpretations and reconcile differences.
-Architectural mismatches are caught here before you see anything.
+Phase 1.5 — Align
+  Models compare interpretations and flag architectural disagreements.
+  Mismatches surface here, before a single line of code is written.
 
-[Phase 2 — Q&A + Spec]          ← your only required input before generation
-Questions are compiled and presented once. You answer them, confirm the
-generated spec, and generation begins.
+Phase 2 — Q&A + Spec                         ← Gate: you answer questions
+  Required questions are presented once.
+  You answer them and confirm the generated spec.
+  Non-required questions are auto-answered using each model's recommendation.
 
-[Phase 3 — Generate + Review]
-Primary generates code (streaming). Self-checks up to 2 passes.
-Reviewer cross-validates and produces surgical edit hunks.
-Coder evaluates each hunk. If disputed, models negotiate for up to 3 rounds.
-Unresolved conflicts escalate to you.
+Phase 3 — Generate + Review loop
+  Primary generates code (streaming, with up to 2 self-check passes).
+  Reviewer cross-validates and produces surgical edit hunks.
+  Coder evaluates each hunk.
+  Disputed hunks trigger model dialogue (up to 3 rounds).
+  Unresolved disputes escalate to you.                ← Gate: arbitration
 
-[File Gate]                      ← review each file before it's saved
-You review each generated file. Send feedback for targeted changes.
-Accept when satisfied.
+File Gate                                             ← Gate: per-file review
+  Each generated file is presented one at a time.
+  Send targeted feedback for changes, or accept.
+  All files accepted → pipeline complete.
 ```
 
-### Pipeline phases
+### Phase reference
 
-| Phase | What happens | Human input? |
+| Phase | What happens | Your input? |
 |---|---|---|
-| `phase1_thinking` | Both models analyze the task in parallel | No |
-| `phase1_5_alignment` | Models reconcile their interpretations (max 2 rounds) | No |
-| `phase2_questions` | Questions compiled, non-required ones auto-answered | No |
+| `phase1_thinking` | Both models analyze the task in parallel | — |
+| `phase1_5_alignment` | Models reconcile interpretations (max 2 rounds) | — |
+| `phase2_questions` | Questions compiled; non-required ones auto-answered | — |
 | `phase2_answering` | You answer required questions | **Yes** |
-| `phase2_contradictions` | Rule-based contradiction check on your answers | No |
-| `phase2_spec` | Deterministic spec generated from questions + answers | No |
+| `phase2_contradictions` | Contradiction check on your answers | — |
+| `phase2_spec` | Deterministic spec built from questions + answers | — |
 | `phase2_spec_confirm` | You confirm the spec before generation starts | **Yes** |
-| `phase3_generating` | Primary streams code | No |
-| `phase3_self_check` | Primary checks its own output (max 2 passes) | No |
-| `phase3_reviewing` | Reviewer cross-validates against the spec | No |
-| `phase3_reviewer_edit` | Reviewer produces surgical edit hunks | No |
-| `phase3_coder_verify` | Primary evaluates reviewer's proposed changes | No |
-| `phase3_dialogue` | Models negotiate disagreements (max 3 rounds) | No |
-| `phase3_consensus` | Code promoted; file gate begins | No |
-| `phase3_file_gate` | You review each file; request changes if needed | **Yes** |
-| `conflict_escalated` | Both model positions shown; you decide | **Yes** |
+| `phase3_generating` | Primary streams code | — |
+| `phase3_self_check` | Primary checks its own output (max 2 passes) | — |
+| `phase3_reviewing` | Reviewer cross-validates against the spec | — |
+| `phase3_reviewer_edit` | Reviewer produces surgical edit hunks | — |
+| `phase3_coder_verify` | Primary evaluates reviewer's proposed changes | — |
+| `phase3_dialogue` | Models negotiate disagreements (max 3 rounds) | — |
+| `phase3_consensus` | Code promoted; file gate begins | — |
+| `phase3_file_gate` | You review each file and request changes | **Yes** |
+| `conflict_escalated` | Both positions shown; you decide | **Yes** |
 | `complete` | All files accepted | — |
 
 ---
@@ -141,29 +155,15 @@ Accept when satisfied.
 
 | Variable | Required | Description |
 |---|---|---|
-| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Yes | Clerk publishable key |
-| `CLERK_SECRET_KEY` | Yes | Clerk secret key |
-| `CLERK_WEBHOOK_SECRET` | After deploy | Clerk webhook signing secret |
-| `DATABASE_URL` | Yes | Neon PostgreSQL connection string |
-| `ENCRYPTION_KEY` | Yes | AES-256-GCM key for stored API keys (`openssl rand -hex 32`) |
-| `NEXT_PUBLIC_APP_URL` | Yes | Your app URL (e.g. `http://localhost:3000`) |
-| `NEXT_PUBLIC_SENTRY_DSN` | No | Sentry error tracking |
-| `SENTRY_AUTH_TOKEN` | No | Sentry source map upload |
-| `DATA_DIR` | No | Where to store project output (default: `./data`) |
+| `ENCRYPTION_KEY` | **Yes** | AES-256-GCM key for stored API keys. Generate with `openssl rand -hex 32`. Never change after first run. |
+| `DATA_DIR` | No | Where to store project data (default: `./data`) |
+| `NEXT_PUBLIC_APP_URL` | No | App URL — used by OpenRouter for HTTP-Referer (default: `http://localhost:3000`) |
+| `NEXT_PUBLIC_SENTRY_DSN` | No | Sentry error tracking DSN |
+| `SENTRY_AUTH_TOKEN` | No | Sentry source map upload token |
 
-### Clerk webhook setup
+### Supported providers
 
-The webhook syncs new users into the database. Without it, users can sign in but the app can't retrieve their stored API keys.
-
-1. Deploy the app
-2. Clerk dashboard → **Webhooks** → **Add Endpoint**
-3. URL: `https://your-domain.com/api/auth/webhook`
-4. Subscribe to `user.created`
-5. Copy the signing secret → set as `CLERK_WEBHOOK_SECRET`
-
-### Supported model providers
-
-Add your API keys under **Settings → API Keys** in the app.
+Add API keys under **Settings → API Keys**.
 
 | Provider | Models |
 |---|---|
@@ -176,251 +176,53 @@ Add your API keys under **Settings → API Keys** in the app.
 | Groq | fast inference models |
 | Together AI | together.ai models |
 
-**Recommended pairing:** DeepSeek V4 Pro as primary + Claude Sonnet 4.6 as reviewer. Different training families means genuine blind spot coverage. At current pricing, $25/month covers ~36M tokens vs Claude Pro's 1–2M.
-
 ### Budget governor
 
-Crucible tracks spend per provider. Four operating modes:
+Crucible tracks spend per provider and switches modes automatically.
 
-| Mode | When | Effect |
+| Mode | Remaining budget | Effect |
 |---|---|---|
-| `FULL` | > 75% budget remaining | Normal operation |
-| `EFFICIENT` | 50–75% remaining | Context compression, tighter prompts |
-| `CONSERVATION` | 25–50% remaining | Aggressive compression, archive memory on demand |
-| `CRITICAL` | < 25% remaining | User warned, graceful degradation options shown |
+| `FULL` | > 75% | Normal operation |
+| `EFFICIENT` | 50–75% | Context compression, tighter prompts |
+| `CONSERVATION` | 25–50% | Aggressive compression; archive memory on demand |
+| `CRITICAL` | < 25% | Warning shown; graceful degradation options presented |
 
-Set per-provider caps independently under **Settings → Budget**.
-
----
-
-## Project structure
-
-```
-src/
-├── app/
-│   ├── (dashboard)/
-│   │   ├── dashboard/         # Main pipeline view
-│   │   ├── files/             # Generated files browser
-│   │   └── settings/          # API keys + budget settings
-│   └── api/
-│       ├── auth/webhook/      # Clerk → database user sync
-│       ├── credentials/       # API key CRUD (encrypted at rest)
-│       ├── pipeline/
-│       │   ├── start/         # Create session, begin pipeline
-│       │   ├── stream/        # SSE — runs the pipeline, streams events
-│       │   ├── message/       # Submit answers / confirm spec
-│       │   ├── pause|play|stop/
-│       │   ├── interrupt/     # Inject human override mid-pipeline
-│       │   ├── resolve/       # Arbitrate an escalated conflict
-│       │   ├── file-accept/   # Accept a file at the gate
-│       │   └── file-feedback/ # Feedback → targeted file regeneration
-│       ├── projects/          # Project list + output restore
-│       ├── output/            # Consensus output for a session
-│       ├── budget/            # Spend status and per-provider caps
-│       └── conversation/      # Session event log
-│
-├── components/pipeline/
-│   ├── PipelineView.tsx       # Phase router + progress strip + controls
-│   ├── ThinkingPanel.tsx      # Phase 1 — model thinking cards
-│   ├── AlignmentPanel.tsx     # Phase 1.5 — alignment messages
-│   ├── QuestionsPanel.tsx     # Phase 2 — Q&A + contradiction resolution
-│   ├── SpecPanel.tsx          # Phase 2 — spec confirmation
-│   ├── GeneratingPanel.tsx    # Phase 3 — streaming code + step indicators
-│   ├── DialoguePanel.tsx      # Phase 3 — coder ↔ reviewer negotiation
-│   ├── ConflictPanel.tsx      # Human arbitration
-│   ├── FileGatePanel.tsx      # Per-file review with feedback + accept
-│   └── CompletePanel.tsx      # Done state with accepted file list
-│
-├── hooks/usePipeline.ts       # SSE connection + all pipeline actions
-├── store/index.ts             # React useReducer store
-│
-├── lib/
-│   ├── adapters/              # One file per provider, all implement ModelAdapter
-│   │   ├── base.ts            # System prompts, parsers, BaseAdapter class
-│   │   ├── openai-compatible.ts # Shared base for OpenAI-API providers
-│   │   └── claude|deepseek|openai|google|mistral|openrouter.ts
-│   ├── pipeline/
-│   │   ├── orchestrator.ts    # createSession, runPipeline, pause/play/stop
-│   │   └── phase*.ts          # One file per pipeline phase
-│   ├── memory/                # Filesystem read/write, session log, memory tiers
-│   ├── budget/index.ts        # Per-provider spend tracking
-│   ├── crypto/index.ts        # AES-256-GCM key encryption
-│   └── utils/tokens|retry.ts  # Token estimation, retry with backoff
-│
-└── types/index.ts             # All TypeScript types + Zod validation schemas
-```
+Set per-provider monthly caps under **Settings → Budget**.
 
 ---
 
 ## Data storage
 
-The database stores only two things: user identity (synced from Clerk) and encrypted API keys.
-
-All project data — generated code, specs, session logs, checkpoints — lives on the filesystem at `DATA_DIR`.
+Everything lives under `DATA_DIR` (`./data` by default). No external services.
 
 ```
 ./data/
+├── crucible.db              # SQLite — projects, encrypted API keys, budget
 └── projects/
     └── {projectId}/
-        ├── output.json          # Restored when you reopen a project
-        ├── output/              # Accepted files written after file gate
-        ├── spec.json            # Locked after Phase 2 — never overwritten
-        ├── session_log.jsonl    # Append-only event log
-        ├── review_list.json     # Low-confidence flags accumulate here
-        └── checkpoints/         # Snapshots at key milestones
-```
-
-### Database schema
-
-```sql
--- User identity (Clerk is the source of truth)
-CREATE TABLE users (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email         TEXT NOT NULL UNIQUE,
-  plan          TEXT NOT NULL DEFAULT 'free',  -- free | indie | pro | team
-  clerk_user_id TEXT NOT NULL UNIQUE,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- API keys, encrypted at rest
-CREATE TABLE api_credentials (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  provider      TEXT NOT NULL,
-  encrypted_key TEXT NOT NULL,            -- AES-256-GCM, never plaintext
-  is_valid      BOOLEAN NOT NULL DEFAULT false,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE(user_id, provider)
-);
-```
-
----
-
-## Adding a new model provider
-
-1. Create `src/lib/adapters/your-provider.ts`
-2. Extend `BaseAdapter` (or `OpenAICompatibleAdapter` if it uses the OpenAI API shape)
-3. Implement the `ModelAdapter` interface — all 9 methods
-4. Register it in `src/lib/adapters/index.ts`
-
-Zero changes to the pipeline, phases, or routing logic.
-
-The interface (in `src/types/index.ts`):
-
-```typescript
-interface ModelAdapter {
-  think(taskDescription: string, contextText?: string): Promise<ThinkingOutput>
-  chat(round: 1 | 2, taskDescription: string, myThinking: ThinkingOutput,
-    otherThinking: ThinkingOutput, previousMessages?: AlignmentMessage[],
-    contextText?: string): Promise<AlignmentMessage>
-  generate(prompt: string, ctx: PipelineContext): AsyncGenerator<string>
-  selfCheck(code: string, spec: SpecDocument, pass: 1 | 2,
-    previousIssues?: SelfCheckIssue[]): Promise<SelfCheckOutput>
-  review(code: string, spec: SpecDocument, round: number,
-    previousReview?: ReviewPayload): Promise<ReviewPayload>
-  reviewerEdit(code: string, spec: SpecDocument,
-    review: ReviewPayload, round: number): Promise<ReviewEdit>
-  coderVerify(originalCode: string, edit: ReviewEdit,
-    mergedCode: string, review: ReviewPayload): Promise<CoderVerification>
-  coderDialogue(code: string, dialogue: DialogueSummary,
-    verification: CoderVerification): Promise<string>
-  reviewerDialogue(code: string, dialogue: DialogueSummary,
-    review: ReviewPayload): Promise<{ response: string; resolved: boolean }>
-  getProvider(): Provider
-  getModelId(): string
-  estimateCost(inputTokens: number, outputTokens: number): number
-}
-```
-
----
-
-## Running tests
-
-```bash
-# Unit tests (no API keys needed)
-npm test
-
-# Watch mode
-npm run test:watch
-
-# Logic tests — 52 tests, no API calls
-npx tsx test-logic.mts
-
-# Full pipeline integration test (requires real API keys)
-DEEPSEEK_API_KEY=sk-... ANTHROPIC_API_KEY=sk-... npx tsx test-pipeline.mts
-
-# Playwright E2E tests
-npm run test:e2e
-```
-
----
-
-## Troubleshooting
-
-### "Session not found" after page refresh
-
-Pipeline state is held in-process memory. If the server restarts (e.g. during `npm run dev` hot reload after a file change), in-flight sessions are lost. Start a new session.
-
-### Pipeline stalls and shows "auto-reconnecting…"
-
-The SSE stream reconnects automatically when a pipeline phase closes mid-stream. If it reconnects more than 10 times without reaching a human gate, you'll see an error. This usually means the model API is returning empty responses. Check:
-- Your API key is valid (Settings → API Keys)
-- The model you selected is available from that provider
-- You haven't hit the provider's rate limit
-
-### Generated code panel is blank during Phase 3
-
-The code streams token by token. If you see the "Generating…" state but no text appears, the model hasn't emitted its first token yet. Reasoning models (e.g. DeepSeek V4 Pro) sometimes think silently for up to 5 minutes before streaming. Wait it out or stop and retry with a faster model.
-
-### "Encryption key mismatch" when loading API keys
-
-Your `ENCRYPTION_KEY` changed after keys were stored. Keys are AES-256-GCM encrypted with that key — if the key changes, existing encrypted values can't be decrypted. Delete the affected credentials in Settings and re-add them.
-
-### File gate shows no code
-
-This happens when `generatedFiles` was not parsed from the model's output. The model must use `=== FILE: path ===` ... `=== /FILE ===` delimiters for multi-file output, or the entire response is stored as `output.txt`. Check your generation prompt in the system prompts inside `src/lib/adapters/base.ts`.
-
-### Files section is empty after pipeline completes
-
-The Files section reads from `data/projects/{id}/output/` — individual files written when you accept each file at the gate. If the pipeline exited before the file gate (e.g. due to an error or unexpected exit), files are stored in `output.json` but the `output/` directory is never written.
-
-This is handled automatically: on the next visit to the Files page, the API detects the missing `output/` directory and hydrates it from `output.json`. If the Files section still shows empty after a refresh, check that consensus was actually reached by looking at the pipeline output in the conversation tab.
-
-### "Pipeline exited unexpectedly" during reviewer edit phase
-
-The reviewer embed edits directly in a structured text format (`=== HUNK ===` delimiters). If you were using an older version of Crucible that used JSON for reviewer edits, the parser would fail on Python or shell code containing unescaped backslashes and double quotes. The current version uses a delimiter format that is not affected by code content.
-
-### Task description too long error
-
-The task description field accepts up to 50,000 characters. The context field (for pasting existing code) accepts up to 40,000 characters. If you're hitting limits, move large code pastes to the context field.
-
-### OpenAI models error with "max_tokens too large"
-
-The generation step is capped at 16,384 completion tokens — the maximum supported by current GPT-4o models. If you're using a newer model with a higher limit, update `max_tokens` in `src/lib/adapters/openai-compatible.ts` line 173.
-
-### Docker container exits immediately
-
-Check that all required environment variables are set in your `.env` file:
-
-```bash
-docker compose config   # shows the resolved config
-docker compose logs     # shows the startup error
+        ├── output.json      # Restored automatically when you reopen a project
+        ├── output/          # Individual accepted files (written at the file gate)
+        ├── spec.json        # Locked after Phase 2 — never overwritten
+        ├── session.jsonl    # Append-only event log
+        ├── reviews.jsonl    # Reviewer flag history per round
+        └── checkpoints/     # Snapshots at key milestones
 ```
 
 ---
 
 ## API key security
 
-Keys stored in the database are encrypted with AES-256-GCM using `ENCRYPTION_KEY`. They are:
+API keys stored in the database are encrypted with AES-256-GCM using `ENCRYPTION_KEY`. They are:
 
-- Never logged anywhere (server or client)
-- Never sent to the browser in any response
+- Never logged on the server or sent to the browser
 - Decrypted only at the moment of an API call, in server memory only
-- Validated with a real API call before being stored (`is_valid = true`)
+- Validated with a live API call before being marked valid and stored
 
 ---
 
-## Token pricing reference (June 2026, per million tokens)
+## Token pricing reference
+
+*June 2026, per million tokens*
 
 | Model | Input | Output |
 |---|---|---|
@@ -435,16 +237,109 @@ Keys stored in the database are encrypted with AES-256-GCM using `ENCRYPTION_KEY
 
 ---
 
+## Troubleshooting
+
+### "Session not found" after a page refresh
+
+**Cause:** Pipeline session state lives in a server-side in-process Map. It survives hot reloads but not a full server restart.
+
+**Fix:** Start a new pipeline session. Previously accepted output restores automatically from `output.json` when you reopen the project.
+
+---
+
+### Pipeline stalls and keeps showing "auto-reconnecting…"
+
+**Cause:** The model API returned an empty response. The client reconnects automatically at pipeline boundaries, but repeated reconnects without reaching a human gate indicate a provider problem.
+
+**Fix:** Check that:
+- Your API key is valid (**Settings → API Keys**)
+- The model ID exists on that provider
+- You haven't hit the provider's rate limit (wait a moment and retry)
+
+---
+
+### Code panel is blank during Phase 3
+
+**Cause:** Reasoning models (DeepSeek V4 Pro, Claude Opus) can think silently for several minutes before streaming their first token.
+
+**Fix:** Wait up to 5 minutes. If nothing appears, stop the session and retry with a faster model such as DeepSeek V4 Flash or GPT-4o.
+
+---
+
+### "Encryption key mismatch" when loading API keys
+
+**Cause:** `ENCRYPTION_KEY` was changed after API keys were stored. All keys are AES-256-GCM encrypted with the value set at storage time.
+
+**Fix:** Delete the affected credentials in **Settings → API Keys** and re-enter them. Encrypted values cannot be recovered after a key change.
+
+---
+
+### File gate shows no code
+
+**Cause:** The model's output wasn't parsed into named file blocks. Multi-file output must use `=== FILE: path ===` … `=== /FILE ===` delimiters.
+
+**Fix:** For single-file tasks, the full response is stored as `output.txt` — this is expected. For multi-file tasks, check the Conversation tab to see the raw model output.
+
+---
+
+### Files section is empty after the pipeline completes
+
+**Cause:** Individual files under `data/projects/{id}/output/` are only written when you accept each file at the gate. If the pipeline ended before the file gate, the directory is empty.
+
+**Fix:** Refresh the Files page. The API hydrates `output/` from `output.json` on the next request. If it's still empty, open the Conversation tab and confirm consensus was reached.
+
+---
+
+### Task description too long
+
+**Cause:** Task descriptions are capped at 50,000 characters; the context field at 40,000 characters.
+
+**Fix:** Move large code pastes to the **Context** field. If you're still hitting the limit, split the task into phases.
+
+---
+
+### OpenAI models error with "max_tokens too large"
+
+**Cause:** The generation step requests 16,384 completion tokens. Some older GPT-4o model variants have a lower cap.
+
+**Fix:** Update `max_tokens` in `src/lib/adapters/openai-compatible.ts` to match the model's actual limit.
+
+---
+
+### Docker container exits immediately
+
+**Fix:**
+```bash
+docker compose config   # confirm ENCRYPTION_KEY is present in the resolved env
+docker compose logs     # read the startup error
+```
+
+---
+
+## Adding a provider
+
+Adding a new model provider touches one file and requires no pipeline changes.
+
+1. Create `src/lib/adapters/your-provider.ts`
+2. Extend `OpenAICompatibleAdapter` if the provider uses the OpenAI API shape (Groq, Together, DeepSeek, and Mistral all do). Otherwise extend `BaseAdapter` directly.
+3. Implement `getProvider()` and any methods that need provider-specific behaviour. Everything else inherits.
+4. Add your provider to the `switch` in `src/lib/adapters/index.ts`
+
+See any of the existing short adapters (`deepseek.ts`, `groq` inside `index.ts`) for working examples.
+
+---
+
 ## Contributing
 
-1. Fork the repo
-2. Create a branch: `git checkout -b feature/my-change`
-3. Make your changes and run `npm test`
-4. Open a pull request
+```bash
+git checkout -b feature/my-change
+npx tsx test-logic.mts     # 52 logic tests, no API keys needed
+npx tsc --noEmit           # must be zero errors before opening a PR
+```
 
-For new model adapters, see [Adding a new model provider](#adding-a-new-model-provider) above.
-
-For bugs and feature requests, open an issue.
+- **New provider:** See [Adding a provider](#adding-a-provider) above — four steps, one file.
+- **Bugs and features:** Open a GitHub issue.
+- **Architecture questions:** Read `docs/decisions.md` for the reasoning behind every major design choice before proposing pipeline changes.
 
 ---
 

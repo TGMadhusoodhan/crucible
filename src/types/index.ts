@@ -3,14 +3,8 @@ import { z } from 'zod'
 // ─── Primitives ───────────────────────────────────────────────────────────────
 
 export type Provider =
-  | 'anthropic'
-  | 'openai'
-  | 'deepseek'
-  | 'google'
-  | 'mistral'
-  | 'openrouter'
-  | 'groq'
-  | 'together'
+  | 'anthropic' | 'openai' | 'deepseek' | 'google'
+  | 'mistral'   | 'openrouter' | 'groq'  | 'together'
 
 export type Plan = 'free' | 'indie' | 'pro' | 'team'
 
@@ -394,11 +388,12 @@ export type PipelinePhase =
 
 export interface PipelineConfig {
   primaryProvider: Provider
-  primaryModelId: string
-  primaryApiKey: string
+  primaryModelId:  string
+  primaryApiKey:   string
+
   reviewerProvider: Provider
-  reviewerModelId: string
-  reviewerApiKey: string
+  reviewerModelId:  string
+  reviewerApiKey:   string
 }
 
 export interface PipelineSessionState {

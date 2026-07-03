@@ -2,6 +2,7 @@ import fs   from 'fs'
 import path from 'path'
 import { getAdapter } from '@/lib/adapters'
 import { getBudgetStatus, recordUsage } from '@/lib/budget'
+import { dbg } from '@/lib/debug'
 import { logBudgetModeChange, logPause, logPlay, logStop } from '@/lib/memory/session-log'
 import { capturePipelineError } from '@/lib/sentry'
 import { generateId } from '@/lib/utils'
@@ -126,6 +127,16 @@ export async function createSession(params: StartPipelineParams): Promise<string
   const { contextText } = params.contextInput
     ? runPhase0Context(params.contextInput)
     : { contextText: '' }
+
+  dbg.orch('createSession', {
+    sessionId,
+    projectId:       params.projectId,
+    primaryProvider: params.config.primaryProvider,
+    primaryModelId:  params.config.primaryModelId,
+    reviewerProvider:params.config.reviewerProvider,
+    reviewerModelId: params.config.reviewerModelId,
+    hasContext:      !!contextText,
+  })
 
   const state: PipelineSessionState = {
     sessionId,
@@ -289,6 +300,7 @@ async function transition(
   state: PipelineSessionState,
   phase: PipelinePhase,
 ): Promise<PipelineSessionState> {
+  dbg.orch(`transition ${state.phase} → ${phase}`, { sessionId: state.sessionId, round: state.round })
   state.phase = phase
   await saveSessionState(state)
   return state
@@ -313,8 +325,20 @@ export async function runPipeline(
   const projectId = state.projectId
   const { config } = state
 
+  dbg.orch('runPipeline start', {
+    sessionId,
+    phase:           state.phase,
+    primaryProvider: config.primaryProvider,
+    primaryModelId:  config.primaryModelId,
+    reviewerProvider:config.reviewerProvider,
+    reviewerModelId: config.reviewerModelId,
+  })
+
   const primary  = getAdapter(config.primaryProvider,  config.primaryModelId,  config.primaryApiKey)
   const reviewer = getAdapter(config.reviewerProvider, config.reviewerModelId, config.reviewerApiKey)
+
+  dbg.adapter('primary adapter created',   { provider: config.primaryProvider,  modelId: config.primaryModelId })
+  dbg.adapter('reviewer adapter created',  { provider: config.reviewerProvider, modelId: config.reviewerModelId })
 
   const maybeStop = async (): Promise<boolean> => {
     const signal = await checkControl(sessionId)
@@ -334,6 +358,11 @@ export async function runPipeline(
 
   if (state.phase === 'phase1_thinking') {
     if (await maybeStop()) return
+    dbg.phase1('starting parallel think', {
+      primary:  `${config.primaryProvider}:${config.primaryModelId}`,
+      reviewer: `${config.reviewerProvider}:${config.reviewerModelId}`,
+      taskLen:  state.taskDescription.length,
+    })
 
     try {
       const result = await runPhase1Thinking(
@@ -341,6 +370,12 @@ export async function runPipeline(
         primary, reviewer, emit, state.contextText,
       )
       state.thinkingOutputs = result
+      dbg.phase1('both models done', {
+        primaryTokens:  result.primary.tokens_used,
+        reviewerTokens: result.reviewer.tokens_used,
+        primaryQs:      result.primary.questions.length,
+        reviewerQs:     result.reviewer.questions.length,
+      })
       const taskTokens = estimateTokens(state.taskDescription)
       recordAndRefreshBudget(state, config.primaryProvider, config.primaryModelId,
         taskTokens, result.primary.tokens_used, emit)
@@ -357,11 +392,13 @@ export async function runPipeline(
 
   if (state.phase === 'phase1_5_alignment') {
     if (await maybeStop()) return
+    dbg.align('evaluating alignment skip heuristic')
 
     try {
       const { primary: pThink, reviewer: rThink } = state.thinkingOutputs!
 
       if (canSkipAlignment(pThink, rThink)) {
+        dbg.align('SKIPPED — models agree, moving to phase2_questions')
         state.alignmentResult = {
           messages: [],
           agreed_questions:              [...pThink.questions, ...rThink.questions],
@@ -372,11 +409,17 @@ export async function runPipeline(
           total_tokens:                  0,
         }
       } else {
+        dbg.align('running alignment rounds')
         const result = await runPhase1_5Alignment(
           projectId, sessionId, state.taskDescription,
           pThink, rThink, primary, reviewer, emit, state.contextText,
         )
         state.alignmentResult = result
+        dbg.align('alignment done', {
+          rounds:   result.rounds_taken,
+          mismatch: result.architectural_mismatch_detected,
+          conflicts:result.unresolved_conflicts.length,
+        })
       }
       state = await transition(state, 'phase2_questions')
     } catch (err) {
@@ -389,6 +432,7 @@ export async function runPipeline(
 
   if (state.phase === 'phase2_questions') {
     if (await maybeStop()) return
+    dbg.phase2('building question list')
 
     try {
       const questions = await runPhase2Questions(
@@ -409,6 +453,10 @@ export async function runPipeline(
       state.userAnswers = autoAnswers
 
       const hasUnansweredRequired = questions.some(q => q.is_required && !autoAnswers[q.id])
+      const requiredCount  = questions.filter(q => q.is_required).length
+      const totalCount     = questions.length
+      dbg.phase2('questions ready', { total: totalCount, required: requiredCount, needsHuman: hasUnansweredRequired })
+
       if (hasUnansweredRequired) {
         state = await transition(state, 'phase2_answering')
         return
@@ -426,9 +474,11 @@ export async function runPipeline(
 
   if (state.phase === 'phase2_contradictions') {
     if (await maybeStop()) return
+    dbg.phase2('running contradiction detection')
 
     const contradictions = detectContradictions(state.questions!, state.userAnswers!)
     state.contradictions = contradictions
+    dbg.phase2('contradiction detection done', { contradictions: contradictions.length })
 
     for (const c of contradictions) {
       emit({ type: 'contradiction', contradiction: c })
@@ -441,6 +491,7 @@ export async function runPipeline(
 
   if (state.phase === 'phase2_spec') {
     if (await maybeStop()) return
+    dbg.phase2('building spec (deterministic — no model call)')
 
     try {
       const spec = await runPhase2Spec({
@@ -455,6 +506,10 @@ export async function runPipeline(
       }, emit)
 
       state.spec = spec
+      dbg.phase2('spec ready — waiting for human confirmation', {
+        criteria: spec.acceptance_criteria.length,
+        edgeCases:spec.edge_cases.length,
+      })
       state = await transition(state, 'phase2_spec_confirm')
       return
     } catch (err) {
@@ -463,7 +518,10 @@ export async function runPipeline(
     }
   }
 
-  if (state.phase === 'phase2_spec_confirm') return
+  if (state.phase === 'phase2_spec_confirm') {
+    dbg.phase2('GATE: waiting for human spec confirmation')
+    return
+  }
 
   // ─── Phase 3 loop: Generate → Review → ReviewerEdit → CoderVerify → Dialogue ─
 
@@ -487,9 +545,12 @@ export async function runPipeline(
     if (state.phase === 'phase3_generating' || state.phase === 'phase3_self_check') {
       try {
         const genResult = await runPhase3Generate(
-          projectId, sessionId, state.round, ctx, primary, emit,
-          undefined,
-          state.generatedCode,
+          projectId,
+          sessionId,
+          state.round,
+          ctx,
+          primary,
+          emit,
         )
         state.generatedCode      = genResult.code
         state.generatedFiles     = genResult.files
@@ -499,11 +560,24 @@ export async function runPipeline(
         state.coderVerification  = undefined
         state.dialogue           = undefined
 
+        dbg.gen('generation complete', {
+          round:      state.round,
+          codeLen:    genResult.code.length,
+          fileCount:  Object.keys(genResult.files).length,
+          files:      Object.keys(genResult.files),
+          tokensOut:  genResult.tokensOut,
+          costUsd:    genResult.costUsd,
+          allClear:   genResult.selfCheckOutput.all_clear,
+          scIssues:   genResult.selfCheckOutput.issues.length,
+        })
+
         const genPromptTokens = estimateTokens(ctx.taskDescription)
           + estimateTokens(JSON.stringify(ctx.spec))
           + estimateTokens(ctx.history.map(m => m.content).join(' '))
+
         recordAndRefreshBudget(state, config.primaryProvider, config.primaryModelId,
           genPromptTokens, genResult.tokensOut, emit)
+
         state = await transition(state, 'phase3_reviewing')
         return
       } catch (err) {
@@ -518,6 +592,11 @@ export async function runPipeline(
 
     if (state.phase === 'phase3_reviewing') {
       const code = state.generatedCode!
+      dbg.review('reviewer cross-validating code', {
+        round:    state.round,
+        reviewer: `${config.reviewerProvider}:${config.reviewerModelId}`,
+        codeLen:  code.length,
+      })
       let review: ReviewPayload
       try {
         review = await runPhase3Review(
@@ -525,6 +604,14 @@ export async function runPipeline(
           state.round, emit, state.lastReview,
         )
         state.lastReview = review
+        dbg.review('review done', {
+          round:     state.round,
+          consensus: review.consensus,
+          flags:     review.flags.length,
+          high:      review.flags.filter(f => f.severity === 'HIGH').length,
+          medium:    review.flags.filter(f => f.severity === 'MEDIUM').length,
+          low:       review.flags.filter(f => f.severity === 'LOW').length,
+        })
 
         const now = Date.now()
         state.conversationHistory = [
@@ -561,12 +648,18 @@ export async function runPipeline(
     if (state.phase === 'phase3_reviewer_edit') {
       const code   = state.generatedCode!
       const review = state.lastReview!
+      dbg.edit('reviewer producing surgical edit hunks', {
+        reviewer: `${config.reviewerProvider}:${config.reviewerModelId}`,
+        round:    state.round,
+        flags:    review.flags.filter(f => f.severity !== 'LOW').length,
+      })
       try {
         const { edit, mergedCode } = await runPhase3ReviewerEdit(
           projectId, sessionId, code, review, ctx, reviewer, state.round, emit,
         )
         state.reviewerEdit = edit
         state.mergedCode   = mergedCode
+        dbg.edit('coder fix applied', { hunks: edit.hunks.length, mergedLen: mergedCode.length })
         state = await transition(state, 'phase3_coder_verify')
       } catch (err) {
         await handleError(state, err, emit)
@@ -583,11 +676,18 @@ export async function runPipeline(
       const edit       = state.reviewerEdit!
       const mergedCode = state.mergedCode!
       const review     = state.lastReview!
+      dbg.verify('coder evaluating reviewer hunks', { round: state.round, hunks: edit.hunks.length })
       try {
         const verification = await runPhase3CoderVerify(
           projectId, sessionId, code, edit, mergedCode, review, ctx, primary, state.round, emit,
         )
         state.coderVerification = verification
+        dbg.verify('coder verdict', {
+          agrees:   verification.agrees,
+          accepted: verification.accepted_hunks.length,
+          rejected: verification.rejected_hunks.length,
+          concerns: verification.concerns.length,
+        })
 
         if (verification.agrees) {
           state.generatedCode = mergedCode
@@ -611,17 +711,24 @@ export async function runPipeline(
       const edit         = state.reviewerEdit!
       const verification = state.coderVerification!
       const review       = state.lastReview!
+      dbg.dialogue('starting coder↔reviewer dialogue', { round: state.round })
       try {
         const dialogue = await runPhase3Dialogue(
           projectId, sessionId, code, mergedCode, edit, verification,
           review, ctx, primary, reviewer, state.round, emit,
         )
         state.dialogue = dialogue
+        dbg.dialogue('dialogue finished', {
+          rounds:   dialogue.rounds,
+          resolved: dialogue.resolved,
+          msgs:     dialogue.messages.length,
+        })
 
         if (dialogue.resolved) {
           state.generatedCode = mergedCode
           state = await transition(state, 'phase3_consensus')
         } else {
+          dbg.dialogue('ESCALATED TO HUMAN — dialogue unresolved after max rounds')
           state = await transition(state, 'conflict_escalated')
           return
         }
@@ -639,6 +746,7 @@ export async function runPipeline(
       const code   = state.generatedCode!
       const files  = state.generatedFiles ?? { 'output.txt': code }
       const review = state.lastReview!
+      dbg.consensus('evaluating consensus', { round: state.round, files: Object.keys(files) })
 
       let decision: Awaited<ReturnType<typeof runPhase3Consensus>>
       try {
@@ -652,6 +760,11 @@ export async function runPipeline(
       }
 
       if (decision.promote) {
+        dbg.consensus('PROMOTED — code reached consensus', {
+          round:     state.round,
+          files:     Object.keys(files),
+          checkpoint:decision.output?.checkpoint_id,
+        })
         state.output         = decision.output
         state.generatedFiles = files
         state.currentFileIndex = 0
@@ -663,6 +776,7 @@ export async function runPipeline(
         return
       }
 
+      dbg.consensus('no consensus yet — looping back to generate', { round: state.round })
       state = await transition(state, 'conflict_escalated')
       return
     }
@@ -676,9 +790,11 @@ export async function runPipeline(
     const files     = state.generatedFiles ?? {}
     const filenames = Object.keys(files)
     const idx       = state.currentFileIndex ?? 0
+    dbg.consensus('file gate', { idx, totalFiles: filenames.length, remaining: filenames.slice(idx) })
 
     if (idx >= filenames.length) {
       // All files accepted — pipeline is complete
+      dbg.consensus('ALL FILES ACCEPTED — pipeline complete')
       emit({ type: 'files_complete', acceptedFiles: files })
       emit({ type: 'done' })
       state = await transition(state, 'complete')

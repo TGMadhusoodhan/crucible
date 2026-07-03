@@ -116,40 +116,52 @@ Crucible solves all four by splitting roles across two models from different tra
 
 ## How The Pipeline Works
 
+The pipeline is a 4-phase resumable state machine. Each human-input gate closes
+the SSE stream; the client reconnects when the user acts.
+
 ```
-User gives project spec or coding task
-        |
-        v
-CONVERSATION LAYER (staging — not shown to user by default)
-├── Primary model generates code
-├── Reviewer model returns structured JSON flags only
-│     { consensus: bool, critical_bugs: [], logic_errors: [],
-│       edge_cases_missed: [], pseudo_code_hints: [] }
-├── If consensus: TRUE → code promoted to Output Layer
-├── If consensus: FALSE → IMMEDIATE human escalation
-│     Clean summary: "Primary thinks X, Reviewer thinks Y"
-│     Human answers → both models anchor to human answer
-│     Explicit acknowledgment required before continuing
-└── Human can intervene at any point:
-      TYPE anywhere → priority interrupt to both models
-      EDIT any model's prompt → re-run from that point, log edit
-      PAUSE → freeze state, check for commands on PLAY
-      STOP → kill pipeline, save all state
-        |
-        v
-OUTPUT LAYER (what user builds from)
-├── Consensus-validated code only
-├── Clean diff from previous version
-├── Change log: what was debated, resolved, human decided
-└── Full conversation trace available on demand
-        |
-        v
-PERSISTENCE LAYER (local filesystem)
-├── ~/.crucible/projects/{project_name}/
-│     memory.json (active + archive memory)
-│     session_log.jsonl (append-only, never deleted)
-│     checkpoints/ (milestone snapshots)
-│     output/ (consensus-validated code files)
+User gives task description + optional codebase context
+        │
+        ▼
+PHASE 1 — Think (parallel, no human input)
+  Primary model  ─┐  each independently produces:
+  Reviewer model ─┘  understood_as, assumptions[], questions[], approach, risks
+        │
+        ▼
+PHASE 1.5 — Align (skipped if models agree, max 2 rounds)
+  Models exchange interpretations and reconcile differences.
+  Architectural mismatches surfaced here before you see anything.
+        │
+        ▼
+PHASE 2 — Q&A + Spec
+  [2a] Questions compiled and merged from both models + second-pass checklist
+  [2b] ← HUMAN: answer required questions (non-required auto-answered)
+  [2c] Rule-based contradiction check on your answers
+  [2d] Deterministic spec generated from questions + answers
+  [2e] ← HUMAN: confirm spec before generation starts
+        │
+        ▼
+PHASE 3 — Generate + Review loop (rounds 1–3, then escalate)
+  [3a] Primary generates code (streaming) + self-check (max 2 passes)
+  [3b] Reviewer cross-validates → structured JSON flags only, never full code
+  [3c] Reviewer produces surgical edit hunks (=== HUNK === delimiters)
+  [3d] Coder evaluates each hunk — accepts or disputes
+  [3e] If disputed: models negotiate (max 3 dialogue rounds)
+  [3f] If still unresolved: ← HUMAN arbitration
+        │
+        ▼
+FILE GATE — per-file review
+  Each generated file presented one at a time.
+  ← HUMAN: send feedback for targeted changes, or accept.
+  All files accepted → pipeline complete.
+        │
+        ▼
+PERSISTENCE — ./data/projects/{id}/
+  output.json (restored when project reopened on any session)
+  output/     (individual files written after each file-gate accept)
+  spec.json   (locked after Phase 2 — never overwritten)
+  session.jsonl (append-only event log)
+  checkpoints/ (snapshots at milestones)
 ```
 
 ---
@@ -181,12 +193,19 @@ Models must explicitly acknowledge before resuming.
 This prevents the "noted, however..." failure mode.
 ```
 
-### 3. Conflict = Immediate Human Escalation
+### 3. Dialogue Before Escalation — But Never More Than 3 Rounds
 ```
-No round-based debate between models.
-First conflict detected → surface to human immediately.
-Format: "Primary: [one line]. Reviewer: [one line]. Your call?"
-Human answers → both models anchor → pipeline resumes.
+Review failure → reviewer edits → coder verifies → if disputed:
+  Round 1 coder message → reviewer response
+  Round 2 coder message → reviewer response
+  Round 3 coder message → reviewer response (final)
+  Still unresolved → HUMAN escalation
+
+Format at escalation: "Coder: [position]. Reviewer: [position]. Your call?"
+Human decision → injected as HUMAN OVERRIDE → pipeline resumes.
+
+Why 3 rounds: unlimited rounds = models reasoning each other into corners.
+3 rounds surfaces genuine disagreements without burning token budget.
 ```
 
 ### 4. Output Layer Only Receives Consensus Code
@@ -215,30 +234,58 @@ Every model implements the same interface. The pipeline never knows or cares whi
 
 ```typescript
 interface ModelAdapter {
-  generate(prompt: string, context: ConversationContext): AsyncGenerator<string>
-  review(code: string, context: ConversationContext): Promise<ReviewPayload>
+  // Phase 1 — independent silent thinking
+  think(taskDescription: string, contextText?: string): Promise<ThinkingOutput>
+
+  // Phase 1.5 — alignment chat (max 2 rounds, enforced at call site)
+  chat(round: 1 | 2, taskDescription: string, myThinking: ThinkingOutput,
+    otherThinking: ThinkingOutput, previousMessages?: AlignmentMessage[],
+    contextText?: string): Promise<AlignmentMessage>
+
+  // Phase 3 — streaming code generation
+  generate(prompt: string, ctx: PipelineContext): AsyncGenerator<string>
+
+  // Phase 3 — coder self-checks own output (max 2 passes, enforced in phase3-generate.ts)
+  selfCheck(code: string, spec: SpecDocument, pass: 1 | 2,
+    previousIssues?: SelfCheckIssue[]): Promise<SelfCheckOutput>
+
+  // Phase 3 — reviewer cross-validates (JSON flags only — NEVER full code)
+  review(code: string, spec: SpecDocument, round: number,
+    previousReview?: ReviewPayload): Promise<ReviewPayload>
+
+  // Phase 3b — reviewer produces surgical edit hunks (=== HUNK === format)
+  reviewerEdit(code: string, spec: SpecDocument,
+    review: ReviewPayload, round: number): Promise<ReviewEdit>
+
+  // Phase 3b — coder evaluates reviewer's hunks
+  coderVerify(originalCode: string, edit: ReviewEdit,
+    mergedCode: string, review: ReviewPayload): Promise<CoderVerification>
+
+  // Phase 3b dialogue
+  coderDialogue(code: string, dialogue: DialogueSummary,
+    verification: CoderVerification): Promise<string>
+  reviewerDialogue(code: string, dialogue: DialogueSummary,
+    review: ReviewPayload): Promise<{ response: string; resolved: boolean }>
+
   getProvider(): Provider
   getModelId(): string
   estimateCost(inputTokens: number, outputTokens: number): number
 }
-
-interface ReviewPayload {
-  consensus: boolean
-  critical_bugs: string[]
-  logic_errors: string[]
-  edge_cases_missed: string[]
-  pseudo_code_hints: string[]
-  reasoning: string
-}
 ```
 
-Implemented adapters:
-- `DeepSeekAdapter` — DeepSeek V4 Pro / V4 Flash
-- `ClaudeAdapter` — Claude Sonnet 4.6 / Opus 4.7
+Implemented adapters (all in `src/lib/adapters/`):
+- `ClaudeAdapter` — Claude Sonnet 4.6 / Opus 4.8
 - `OpenAIAdapter` — GPT-4o / GPT-5.4 / GPT-5.5
+- `DeepSeekAdapter` — DeepSeek V4 Pro / V4 Flash (extends OpenAICompatibleAdapter)
 - `GoogleAdapter` — Gemini Pro / Flash
-- `MistralAdapter` — Mistral Large / Codestral
-- `OpenRouterAdapter` — any model via OpenRouter
+- `MistralAdapter` — Mistral Large / Codestral (extends OpenAICompatibleAdapter)
+- `OpenRouterAdapter` — any model via OpenRouter (extends OpenAICompatibleAdapter)
+- `GroqAdapter` — fast inference (extends OpenAICompatibleAdapter)
+- `TogetherAdapter` — Together AI (extends OpenAICompatibleAdapter)
+
+New providers = new adapter class extending `BaseAdapter` or `OpenAICompatibleAdapter`.
+Override `generate()` for provider-specific streaming; all other methods inherit.
+Zero changes to the pipeline.
 
 ### Recommended Default Configuration
 ```
@@ -320,64 +367,98 @@ Budget dashboard always visible to user:
 ## Local File Structure
 
 ```
-~/.crucible/
+./data/                              # controlled by DATA_DIR env var (default ./data)
+├── crucible.db                      # SQLite — projects, credentials, budget
+├── crucible.db-shm                  # SQLite WAL shm
+├── crucible.db-wal                  # SQLite WAL log
 └── projects/
     └── {project-id}/
-        ├── memory.json          # Two-tier memory (active + archive)
-        ├── session_log.jsonl    # Append-only, every message timestamped
-        ├── config.json          # Project settings, model config
-        ├── checkpoints/
-        │   └── {timestamp}_{trigger}.json  # Snapshots
-        └── output/
-            └── {filename}       # Consensus-validated code files
+        ├── output.json              # ConsensusOutput + spec — restored on reopen
+        ├── output/                  # Individual accepted files (written at file gate)
+        │   └── {relative/path}
+        ├── spec.json                # Write-once after Phase 2 confirm
+        ├── session.jsonl            # Append-only event log
+        ├── reviews.jsonl            # Reviewer flag history per round
+        └── checkpoints/
+            └── {timestamp}_{trigger}.json   # Snapshots at milestones
 ```
 
-Checkpoint triggers: module complete, conflict resolved, human confirms, manual save.
-Each checkpoint = output snapshot + one paragraph summary.
+Checkpoint triggers: `module_complete`, `conflict_resolved`, `human_confirm`, `manual`.
+Each checkpoint = full ConsensusOutput snapshot + one-paragraph summary.
+
+Pipeline session state (in-flight phases, partial output) lives in a global in-process
+Map (`global.__sessionStore`). It survives Next.js hot reloads but not a full server
+restart. Completed output is always recoverable from `output.json`.
 
 ---
 
 ## Tech Stack
 
 ```
-FRONTEND:   Next.js 14 (App Router) + TypeScript + Tailwind CSS
-BACKEND:    Next.js API Routes (same repo, one Vercel deployment)
-DATABASE:   Neon PostgreSQL (2 tables only: users, api_credentials)
-AUTH:       Clerk
-CACHE:      Upstash Redis (pipeline state + rate limiting)
-LOCAL:      User filesystem via File System Access API
-HOSTING:    Vercel
-MONITORING: Sentry
+FRONTEND:        Next.js 16.2.6 (App Router) + TypeScript strict + Tailwind CSS v4
+BACKEND:         Next.js API Routes (same repo)
+DATABASE:        SQLite via better-sqlite3 + Drizzle ORM (./data/crucible.db)
+SESSION STATE:   In-process global Map (survives hot reload, not restarts)
+AUTH:            None — single-user local app (userId hardcoded to 'local')
+HOSTING:         Docker (primary) — docker-compose.yml, data volume mounted at /data
+MONITORING:      Sentry (optional)
 ```
+
+There is no external database, no Redis, no Clerk, no Vercel dependency.
+The Docker container is the complete deployment unit.
 
 ---
 
 ## Database Schema (Complete — Do Not Add Tables Without Discussion)
 
+SQLite. Managed by Drizzle ORM (`src/lib/db/schema.ts`). Auto-created on first run.
+
 ```sql
--- Table 1
-CREATE TABLE users (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email       TEXT NOT NULL UNIQUE,
-  plan        TEXT NOT NULL DEFAULT 'free'
-                   CHECK (plan IN ('free', 'indie', 'pro', 'team')),
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  clerk_user_id TEXT NOT NULL UNIQUE
+-- Project configuration (model pairing stored per-project)
+CREATE TABLE projects (
+  id                TEXT PRIMARY KEY,
+  name              TEXT NOT NULL,
+  description       TEXT NOT NULL DEFAULT '',
+  primary_provider  TEXT NOT NULL,
+  primary_model_id  TEXT NOT NULL,
+  reviewer_provider TEXT NOT NULL,
+  reviewer_model_id TEXT NOT NULL,
+  created_at        INTEGER NOT NULL       -- unix ms
 );
 
--- Table 2
+-- API keys, AES-256-GCM encrypted. One row per provider.
 CREATE TABLE api_credentials (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  provider      TEXT NOT NULL,
+  id            TEXT PRIMARY KEY,
+  provider      TEXT NOT NULL UNIQUE,     -- no user_id — single-user app
   encrypted_key TEXT NOT NULL,
-  is_valid      BOOLEAN NOT NULL DEFAULT false,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE(user_id, provider)
+  is_valid      INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL
+);
+
+-- Per-provider monthly spend (replaces Redis incrbyfloat keys)
+CREATE TABLE budget_spend (
+  provider   TEXT NOT NULL,
+  year_month TEXT NOT NULL,               -- 'YYYY-MM'
+  spend_usd  REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (provider, year_month)
+);
+
+-- User-set caps per provider
+CREATE TABLE provider_caps (
+  provider TEXT PRIMARY KEY,
+  cap_usd  REAL NOT NULL
+);
+
+-- Per-session cost accumulation
+CREATE TABLE session_costs (
+  session_id TEXT PRIMARY KEY,
+  cost_usd   REAL NOT NULL DEFAULT 0,
+  tokens     INTEGER NOT NULL DEFAULT 0
 );
 ```
 
 Billing table is intentionally excluded from V1. Add only when Stripe integration begins.
+Users table removed — single-user app, no auth, userId is always 'local'.
 
 ---
 
@@ -385,7 +466,7 @@ Billing table is intentionally excluded from V1. Add only when Stripe integratio
 
 ```typescript
 type Provider =
-  | 'anthropic'    // claude-sonnet-4-6, claude-opus-4-7
+  | 'anthropic'    // claude-sonnet-4-6, claude-opus-4-8
   | 'openai'       // gpt-4o, gpt-5-4, gpt-5-5
   | 'deepseek'     // deepseek-v4-pro, deepseek-v4-flash
   | 'google'       // gemini-pro, gemini-flash
@@ -395,33 +476,52 @@ type Provider =
   | 'together'     // together.ai models
 ```
 
-New providers = new adapter class. Zero changes to pipeline.
+New providers = new adapter class extending `BaseAdapter` or `OpenAICompatibleAdapter`.
+Zero changes to pipeline.
 
 ---
 
 ## API Routes Structure
 
 ```
-POST  /api/auth/webhook              # Clerk webhook → create user in DB
-GET   /api/credentials               # List user's connected providers
-POST  /api/credentials               # Add and validate new API key
+# Credentials (API keys, encrypted at rest)
+GET    /api/credentials              # List connected providers
+POST   /api/credentials              # Add + validate new API key
 DELETE /api/credentials/:id          # Remove API key
 
-GET   /api/projects                  # List projects (from local FS)
-POST  /api/projects                  # Create new project
-GET   /api/projects/:id              # Get project + memory
+# Models
+GET    /api/models/:provider         # Fetch model list from provider's /v1/models
 
-POST  /api/pipeline/start            # Start pipeline session
-POST  /api/pipeline/message          # Send user message
-GET   /api/pipeline/stream           # SSE stream of pipeline activity
-POST  /api/pipeline/interrupt        # Human override injection
-POST  /api/pipeline/resolve          # Human resolves conflict
-POST  /api/pipeline/pause            # Pause pipeline
-POST  /api/pipeline/play             # Resume pipeline
-POST  /api/pipeline/stop             # Stop pipeline
+# Projects
+GET    /api/projects                 # List all projects
+POST   /api/projects                 # Create new project
+GET    /api/projects/:id             # Get project config
+GET    /api/projects/:id/output      # Restore last consensus output for project
 
-GET   /api/output/:sessionId         # Get consensus code
-GET   /api/budget                    # Current budget status
+# Pipeline — session lifecycle
+POST   /api/pipeline/start           # Create session + begin Phase 1
+GET    /api/pipeline/stream          # SSE: runs pipeline, streams events (closes at gates)
+POST   /api/pipeline/pause           # Pause (sets control signal, closes stream)
+POST   /api/pipeline/play            # Resume (clears control signal, client reconnects)
+POST   /api/pipeline/stop            # Stop (terminal — start new session to retry)
+
+# Pipeline — human-input gates
+POST   /api/pipeline/message         # answers | confirm_spec (advances phase, client reconnects)
+POST   /api/pipeline/interrupt       # Inject HUMAN OVERRIDE mid-pipeline
+POST   /api/pipeline/resolve         # Arbitrate escalated conflict
+POST   /api/pipeline/file-accept     # Accept current file at gate, advance to next
+POST   /api/pipeline/file-feedback   # Targeted file feedback → model regenerates → returns code
+
+# Output + conversation
+GET    /api/output/:sessionId        # Full ConsensusOutput for a session
+GET    /api/conversation/:sessionId  # Event log (view=events|timeline|summary, since=, eventId=)
+
+# Budget
+GET    /api/budget                   # Spend status + per-provider breakdown
+PATCH  /api/budget                   # Set per-provider cap { provider, capUsd }
+
+# Health
+GET    /api/health                   # Liveness probe
 ```
 
 ---
@@ -429,28 +529,27 @@ GET   /api/budget                    # Current budget status
 ## Environment Variables Required
 
 ```bash
-# Clerk
-NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=
-CLERK_SECRET_KEY=
-CLERK_WEBHOOK_SECRET=
+# ── REQUIRED ───────────────────────────────────────────────────────────────────
 
-# Neon
-DATABASE_URL=
-
-# Upstash Redis
-UPSTASH_REDIS_REST_URL=
-UPSTASH_REDIS_REST_TOKEN=
-
-# Encryption (generate with: openssl rand -hex 32)
+# AES-256-GCM key for stored API keys. Generate ONCE: openssl rand -hex 32
+# CRITICAL: Never change this after first run — all stored API keys become unreadable.
 ENCRYPTION_KEY=
 
-# Sentry
+# ── OPTIONAL ───────────────────────────────────────────────────────────────────
+
+# Where to store project data (default: ./data, mounted as volume in Docker)
+DATA_DIR=./data
+
+# Sentry error reporting — leave blank to disable
 NEXT_PUBLIC_SENTRY_DSN=
 SENTRY_AUTH_TOKEN=
 
-# App
-NEXT_PUBLIC_APP_URL=
+# Used by OpenRouter for HTTP-Referer header (default: http://localhost:3000)
+NEXT_PUBLIC_APP_URL=http://localhost:3000
 ```
+
+No external services required. No DATABASE_URL, no Redis URL, no Clerk keys.
+The SQLite database auto-creates at `$DATA_DIR/crucible.db` on first start.
 
 ---
 
@@ -474,7 +573,7 @@ Future tiers (Pro $24, Team $49) added when user demand justifies.
 
 ---
 
-## Pricing Reference (May 2026, for budget governor)
+## Pricing Reference (June 2026, for budget governor)
 
 ```typescript
 const MODEL_PRICING: Record<string, { input: number; output: number }> = {
@@ -499,6 +598,8 @@ Do not add these without explicit discussion:
 
 ```
 - Billing / Stripe integration (no users paying yet)
+- Multi-user / auth layer (currently single-user, userId = 'local')
+- Local model / Ollama integration (removed 2026-07-03 — not needed for V1)
 - Archive memory compression engine (manual for now)
 - Checkpoint automation (manual save only)
 - Team / multi-seat features
@@ -522,14 +623,14 @@ Do not add these without explicit discussion:
 - All model calls are async/await with try-catch
 - Never log API keys, tokens, or user code
 - Error messages to user are always human-readable
-- Console.log only in development, never production
+- No console.log in production — use `src/lib/debug.ts` (gated by NODE_ENV; set CRUCIBLE_DEBUG=1 to enable in prod)
 ```
 
 ---
 
 ## When In Doubt
 
-The architecture document is in `docs/architecture.md`.
-The full decision log with reasoning is in the project PDF.
+The full decision log with reasoning is in `docs/decisions.md`.
+The running build log is in `docs/build_log.md`.
 The pipeline is the product. The models are pluggable.
 When adding any feature ask: does this serve the pipeline or distract from it?

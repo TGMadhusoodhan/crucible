@@ -1,57 +1,50 @@
 # Current Build Step
 
-Step: 15 — End-to-End Test
+Step: Code Review Fixes + Hybrid Mode Removal
 Status: COMPLETE
-Started: 2026-05-31
-Last Updated: 2026-05-31
+Started: 2026-07-03
+Last Updated: 2026-07-03
 
 ## What Is Done
 
-### Steps 1–11 all complete
-- Foundation: DB, Auth, Crypto, Credentials (Steps 1–5)
-- Types: complete 4-phase type system (Step 6)
-- Adapters: all 5 methods on all providers (Step 7)
-- Memory: filesystem, session-log, active-memory, archive-memory, utils (Step 8)
-- Pipeline phases: all 11 files (Step 9)
-- Conversation Tab event-log.ts (Step 10)
-- Budget Governor integration in orchestrator (Step 11)
+- Full code review of uncommitted diff (Prompts 1–4 batch)
+- Removed Ollama / hybrid generation mode completely
+- Applied all critical and high-priority fixes from code review
+- TypeScript: zero source errors
 
-## What Was Built In Steps 10–11
+**Prompt 1 (DONE)**
+- Types: GenerationMode, FileManifest, FileDefinition, fileManifestSchema
+- scaffold() on ModelAdapter interface
+- OllamaAdapter in index.ts, SSE events scaffold_ready + file_generating
+- Store actions SCAFFOLD_READY + FILE_GENERATING
 
-Step 10 — src/lib/conversation/event-log.ts:
-- getSessionEvents(projectId, opts) — filtered query over session_log.jsonl
-- getEventFullContent(projectId, eventId) — expand a single event
-- getEventsSince(projectId, cursorTimestamp) — incremental polling
-- getPhaseTimeline(projectId) — PhaseGroup[] for conversation tab timeline
-- getSessionSummary(projectId) — SessionSummary stats for session header
-- serializeEventForSSE(event) / serializeHeartbeat() — SSE formatting
-- filterActivityEvents / filterConflictEvents / filterOverrideEvents / groupReviewsByRound
+**Prompt 2 (DONE)**
+- BaseAdapter.scaffold() full implementation + SCAFFOLD_SYSTEM_PROMPT
+- callTextCompletion() protected hook in BaseAdapter (throws by default)
+- phase3-scaffold.ts runner
+- OllamaAdapter moved to src/lib/adapters/ollama.ts
 
-Step 11 — Budget Governor integration:
-- Added userId: string to PipelineSessionState (types/index.ts)
-- Added userId to StartPipelineParams and createSession() in orchestrator.ts
-- Added recordAndRefreshBudget() helper — calls recordUsage() fire-and-forget, refreshes budget mode
-- Wired into Phase 1 (both models' thinking tokens) and Phase 3 (generate + review tokens)
-- Budget mode change → logBudgetModeChange + SSE phase_change event
+**Prompt 3 (DONE)**
+- phase3-generate.ts: generator/checker split, PATH B per-file loop
+- buildPerFilePrompt + runPerFileSelfCheck + escalation
+- getAdapter endpoint? 4th param, backward-compatible signature
 
-TypeScript: zero errors.
+**Prompt 4 (DONE)**
+- callTextCompletion() in ClaudeAdapter (messages.create) and OpenAICompatibleAdapter (chat.completions.create)
+- OllamaAdapter inherits callTextCompletion() from OpenAICompatibleAdapter automatically
+- Orchestrator: localAdapter construction, scaffold phase in runPipeline, generator/checker split in runPhase3Generate, budget skip for local generation
+- start/route.ts: generationMode + localModelId + localEndpoint schema + hybrid validation
+- ProjectNavigator: generation mode pill toggle + hybrid inputs in NewProjectModal
+- GeneratingPanel: phase3_scaffold spinner view + per-file progress strip
 
 ## What Remains
 
-Step 12 — API Routes (replace 501 stubs with real implementations):
-- POST /api/pipeline/start
-- POST /api/pipeline/message  (submit answers / confirm spec / send override)
-- GET  /api/pipeline/stream   (SSE)
-- POST /api/pipeline/pause
-- POST /api/pipeline/play
-- POST /api/pipeline/stop
-- POST /api/pipeline/interrupt
-- POST /api/pipeline/resolve
-- GET  /api/output/[sessionId]
-- GET  /api/projects, POST /api/projects
-- GET  /api/projects/[id]
-
-Steps 13–15 to follow (Frontend UI, Sentry, E2E test).
+- None in this prompt sequence
 
 ## Blockers
+
 - None
+
+## Next
+
+Smoke test the full hybrid pipeline or move to next feature.

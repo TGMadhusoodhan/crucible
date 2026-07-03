@@ -19,7 +19,6 @@ class TogetherAdapter extends OpenAICompatibleAdapter {
     super(modelId, apiKey, 'https://api.together.xyz/v1')
   }
   getProvider(): Provider { return 'together' }
-  // Together routes to many models; JSON mode support is uneven across them
   protected supportsJsonMode(): boolean { return false }
 }
 

@@ -1,5 +1,6 @@
 import { logPhaseStart } from '@/lib/memory/session-log'
 import { retryWithTimeout, TIMEOUT_DEFAULT_MS } from '@/lib/utils/retry'
+import { dbg } from '@/lib/debug'
 import type {
   CoderVerification,
   DialogueSummary,
@@ -40,6 +41,11 @@ export async function runPhase3Dialogue(
 ): Promise<DialogueSummary> {
   await logPhaseStart(projectId, sessionId, 'phase3_dialogue', `Phase 3: Model Dialogue (round ${round})`)
   emit({ type: 'phase_change', phase: 'phase3_dialogue' })
+  dbg.dialogue('starting dialogue', {
+    coder:    `${primary.getProvider()}:${primary.getModelId()}`,
+    reviewer: `${reviewer.getProvider()}:${reviewer.getModelId()}`,
+    maxRounds:MAX_DIALOGUE_ROUNDS,
+  })
 
   const summary: DialogueSummary = {
     messages:              [],
@@ -53,6 +59,7 @@ export async function runPhase3Dialogue(
 
   for (let dialogueRound = 1; dialogueRound <= MAX_DIALOGUE_ROUNDS; dialogueRound++) {
     summary.rounds = dialogueRound
+    dbg.dialogue(`round ${dialogueRound}/${MAX_DIALOGUE_ROUNDS} — coder turn`)
 
     // Coder's turn
     const coderMessage = await retryWithTimeout(
@@ -63,8 +70,10 @@ export async function runPhase3Dialogue(
     summary.messages.push(coderMsg)
     summary.coderFinalPosition = coderMessage
     emit({ type: 'dialogue_msg', message: coderMsg })
+    dbg.dialogue(`coder said`, { round: dialogueRound, msg: coderMessage.slice(0, 120) })
 
     // Reviewer's turn
+    dbg.dialogue(`round ${dialogueRound} — reviewer turn`)
     const reviewerReply = await retryWithTimeout(
       () => reviewer.reviewerDialogue(code, summary, review),
       { timeoutMs: TIMEOUT_DEFAULT_MS, label: `dialogue:reviewer:${dialogueRound}` },
@@ -78,10 +87,12 @@ export async function runPhase3Dialogue(
     summary.messages.push(reviewerMsg)
     summary.reviewerFinalPosition = reviewerReply.response
     emit({ type: 'dialogue_msg', message: reviewerMsg })
+    dbg.dialogue(`reviewer said`, { round: dialogueRound, resolved: reviewerReply.resolved, msg: reviewerReply.response.slice(0, 120) })
 
     // Check if coder's message signals resolution
     const coderResolved = coderMessage.toUpperCase().includes('RESOLVED')
     if (reviewerReply.resolved || coderResolved) {
+      dbg.dialogue('RESOLVED', { round: dialogueRound, resolvedBy: reviewerReply.resolved ? 'reviewer' : 'coder' })
       summary.resolved = true
       emit({ type: 'dialogue_resolved', mergedCode })
       break
@@ -98,6 +109,7 @@ export async function runPhase3Dialogue(
   }
 
   if (!summary.resolved) {
+    dbg.dialogue('ESCALATED — max rounds reached without resolution', { rounds: summary.rounds })
     emit({ type: 'dialogue_escalated', summary })
   }
 

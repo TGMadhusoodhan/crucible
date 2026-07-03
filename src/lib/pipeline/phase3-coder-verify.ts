@@ -1,5 +1,6 @@
 import { logPhaseStart } from '@/lib/memory/session-log'
 import { retryWithTimeout, TIMEOUT_DEFAULT_MS } from '@/lib/utils/retry'
+import { dbg } from '@/lib/debug'
 import type { CoderVerification, ModelAdapter, PipelineContext, ReviewEdit, ReviewPayload, SSEEvent } from '@/types'
 
 /**
@@ -23,9 +24,11 @@ export async function runPhase3CoderVerify(
 ): Promise<CoderVerification> {
   await logPhaseStart(projectId, sessionId, 'phase3_coder_verify', `Phase 3: Coder Verify (round ${round})`)
   emit({ type: 'phase_change', phase: 'phase3_coder_verify' })
+  dbg.verify('coder evaluating reviewer hunks', { coder: `${primary.getProvider()}:${primary.getModelId()}`, round, hunks: edit.hunks.length })
 
   // If reviewer produced no hunks (no actionable edits), coder auto-agrees
   if (edit.hunks.length === 0) {
+    dbg.verify('no hunks — coder auto-agrees')
     const verification: CoderVerification = {
       agrees:         true,
       accepted_hunks: [],
@@ -40,6 +43,7 @@ export async function runPhase3CoderVerify(
     () => primary.coderVerify(originalCode, edit, mergedCode, review),
     { timeoutMs: TIMEOUT_DEFAULT_MS, label: `phase3:coderVerify:round${round}` },
   )
+  dbg.verify('coder verdict', { agrees: verification.agrees, accepted: verification.accepted_hunks.length, rejected: verification.rejected_hunks.length })
 
   emit({ type: 'coder_verify_done', verification })
   return verification

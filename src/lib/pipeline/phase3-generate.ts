@@ -1,11 +1,13 @@
 import { logGenerationDone, logGenerationStart, logPhaseStart, logSelfCheck } from '@/lib/memory/session-log'
 import { buildGenerationPrompt } from '@/lib/adapters/base'
+import { dbg } from '@/lib/debug'
 import { retryWithTimeout, TIMEOUT_DEFAULT_MS } from '@/lib/utils/retry'
 import { estimateTokens } from '@/lib/utils/tokens'
 import type {
   ModelAdapter,
   PipelineContext,
   ReviewPayload,
+  SelfCheckIssue,
   SelfCheckOutput,
   SSEEvent,
 } from '@/types'
@@ -30,9 +32,6 @@ async function generateCode(
   const stream = primary.generate(prompt, ctx)
   let code = ''
 
-  // Race each stream.next() against an idle timer.
-  // First token gets a longer window — the model may be doing silent reasoning.
-  // Once streaming starts, gaps should be short; 90s of silence = real hang.
   function nextWithIdleTimeout(isFirst: boolean): Promise<IteratorResult<string>> {
     const ms    = isFirst ? FIRST_TOKEN_TIMEOUT_MS : INTER_TOKEN_TIMEOUT_MS
     const label = isFirst
@@ -67,8 +66,6 @@ async function generateCode(
 
 // ─── Self-check loop (max 2 passes) ──────────────────────────────────────────
 
-// Sentinel text written by parseSelfCheckOutput when the model returns non-JSON.
-// Detected here so we retry the API call instead of treating it as a code issue.
 const PARSE_FAILURE_HINT = 'Retry the self-check'
 
 function isParseFailure(output: SelfCheckOutput): boolean {
@@ -80,18 +77,15 @@ function isParseFailure(output: SelfCheckOutput): boolean {
 }
 
 async function runSelfCheckPass(
-  primary:        ModelAdapter,
-  code:           string,
-  ctx:            PipelineContext,
-  pass:           1 | 2,
-  projectId:      string,
-  sessionId:      string,
-  emit:           (event: SSEEvent) => void,
-  previousIssues?: import('@/types').SelfCheckIssue[],
+  primary:         ModelAdapter,
+  code:            string,
+  ctx:             PipelineContext,
+  pass:            1 | 2,
+  projectId:       string,
+  sessionId:       string,
+  emit:            (event: SSEEvent) => void,
+  previousIssues?: SelfCheckIssue[],
 ): Promise<{ code: string; output: SelfCheckOutput }> {
-  // Self-check is a first-pass quality gate — the reviewer is the critical gate.
-  // If the model returns empty responses or consistently fails, skip rather than
-  // crashing the whole pipeline. The reviewer will catch what self-check missed.
   let selfCheckOutput: SelfCheckOutput
   try {
     selfCheckOutput = await retryWithTimeout(
@@ -109,8 +103,6 @@ async function runSelfCheckPass(
     return { code, output: skipped }
   }
 
-  // Model returned non-JSON — retry the self-check call (not a code patch).
-  // If the retry also fails to parse, treat as all_clear and hand off to reviewer.
   if (isParseFailure(selfCheckOutput)) {
     try {
       const retried = await retryWithTimeout(
@@ -138,8 +130,6 @@ async function runSelfCheckPass(
     return { code, output: selfCheckOutput }
   }
 
-  // Issues found — patch the code using the self-check issues as hints
-  // Reuse the PATCH MODE path in buildGenerationPrompt
   const patchReview: ReviewPayload = {
     consensus:              false,
     round:                  pass,
@@ -167,19 +157,12 @@ async function runSelfCheckPass(
 
 // ─── Multi-file output parser ─────────────────────────────────────────────────
 
-// Parses === FILE: path === ... === /FILE === delimiters from AI output.
-// Falls back to { 'output.txt': raw } if no delimiters are found (single-file task).
 export function parseMultiFileOutput(raw: string): Record<string, string> {
-  // Strip an outer markdown code fence if the model wrapped the entire output in one.
-  // Pattern: optional language tag, then content, then closing ```.
-  // This is a common failure mode where the model wraps all FILE: blocks in a single fence.
   let text = raw.trim()
   const outerFence = text.match(/^```[a-z]*\r?\n([\s\S]*?)```\s*$/)
   if (outerFence?.[1]) text = outerFence[1]
 
   const files: Record<string, string> = {}
-  // Accept both LF and CRLF line endings — AI models on Windows or Azure may output CRLF.
-  // trim() on filename strips any trailing \r from CRLF sequences.
   const pattern = /=== FILE: (.+?) ===\r?\n([\s\S]*?)=== \/FILE ===/g
   let match: RegExpExecArray | null
   while ((match = pattern.exec(text)) !== null) {
@@ -203,36 +186,33 @@ export interface Phase3GenerateResult {
 /**
  * Phase 3 — Code generation + self-check.
  *
- * 1. Generate code (streaming) — normal mode or PATCH MODE if patchReview provided.
- * 2. Self-check pass 1: if issues, patch and self-check pass 2.
+ * 1. Generate code (streaming).
+ * 2. Self-check pass 1: if issues found, patch and self-check pass 2.
  * 3. Never exceeds 2 self-check passes — architecture rule.
  * 4. Returns final code regardless of remaining issues (reviewer handles next).
  */
 export async function runPhase3Generate(
-  projectId:     string,
-  sessionId:     string,
-  round:         number,
-  ctx:           PipelineContext,
-  primary:       ModelAdapter,
-  emit:          (event: SSEEvent) => void,
-  patchReview?:  ReviewPayload,
-  previousCode?: string,          // required when patchReview is set — the code to patch
+  projectId:  string,
+  sessionId:  string,
+  round:      number,
+  ctx:        PipelineContext,
+  primary:    ModelAdapter,
+  emit:       (event: SSEEvent) => void,
 ): Promise<Phase3GenerateResult> {
+  dbg.gen('starting generation', {
+    generator: `${primary.getProvider()}:${primary.getModelId()}`,
+    round,
+  })
+
   await logPhaseStart(projectId, sessionId, 'phase3_generating', 'Phase 3: Code Generation')
   emit({ type: 'phase_change', phase: 'phase3_generating' })
   await logGenerationStart(projectId, sessionId, round, primary.getProvider())
 
-  // Patch mode: reviewer found issues — send the previous code + specific flags back to
-  // the primary so it makes targeted edits instead of regenerating from scratch.
-  // previousCode MUST be the actual generated code, not the task description.
-  const prompt = buildGenerationPrompt(
-    ctx,
-    patchReview && previousCode ? { code: previousCode, review: patchReview } : undefined,
-  )
+  const prompt = buildGenerationPrompt(ctx)
 
-  // Streaming generation: no retry — a mid-stream retry would emit duplicate tokens.
-  // Idle timeout is enforced inside generateCode (90s per token, not total).
+  dbg.gen('streaming generation started', { generator: `${primary.getProvider()}:${primary.getModelId()}` })
   let code = await generateCode(primary, prompt, ctx, emit)
+  dbg.gen('streaming generation done', { codeLen: code.length })
 
   const tokensOut = estimateTokens(code)
   const costUsd   = primary.estimateCost(estimateTokens(prompt), tokensOut)
@@ -240,22 +220,23 @@ export async function runPhase3Generate(
   await logGenerationDone(projectId, sessionId, round, code.length, tokensOut, costUsd, primary.getProvider())
 
   emit({ type: 'phase_change', phase: 'phase3_self_check' })
-
-  // ─── Self-check pass 1 ───────────────────────────────────────────────────────
+  dbg.selfcheck('starting self-check pass 1', { checker: `${primary.getProvider()}:${primary.getModelId()}` })
 
   let selfCheckOutput: SelfCheckOutput
   const pass1 = await runSelfCheckPass(primary, code, ctx, 1, projectId, sessionId, emit)
   code            = pass1.code
   selfCheckOutput = pass1.output
-
-  // ─── Self-check pass 2 (only if pass 1 found issues) ────────────────────────
+  dbg.selfcheck('pass 1 done', { allClear: pass1.output.all_clear, issues: pass1.output.issues.length })
 
   if (!pass1.output.all_clear && pass1.output.issues.length > 0 && MAX_SELF_CHECK_PASSES >= 2) {
+    dbg.selfcheck('pass 1 found issues — running pass 2', { issues: pass1.output.issues.map(i => i.severity) })
     const pass2 = await runSelfCheckPass(primary, code, ctx, 2, projectId, sessionId, emit, pass1.output.issues)
     code            = pass2.code
     selfCheckOutput = pass2.output
+    dbg.selfcheck('pass 2 done', { allClear: pass2.output.all_clear, issues: pass2.output.issues.length })
   }
 
   const files = parseMultiFileOutput(code)
+  dbg.gen('generation complete', { files: Object.keys(files), totalCodeLen: code.length })
   return { code, files, selfCheckOutput, tokensOut, costUsd }
 }

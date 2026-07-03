@@ -1,4 +1,5 @@
 import { logAlignmentConflict, logAlignmentMessage, logPhaseStart } from '@/lib/memory/session-log'
+import { dbg } from '@/lib/debug'
 import { estimateTokens } from '@/lib/utils/tokens'
 import { retryWithTimeout, TIMEOUT_DEFAULT_MS } from '@/lib/utils/retry'
 import { generateId } from '@/lib/utils'
@@ -90,6 +91,7 @@ export async function runPhase1_5Alignment(
 ): Promise<AlignmentResult> {
   await logPhaseStart(projectId, sessionId, 'phase1_5_alignment', 'Phase 1.5: Alignment')
   emit({ type: 'phase_change', phase: 'phase1_5_alignment' })
+  dbg.align('starting alignment round 1')
 
   const messages: AlignmentMessage[] = []
   let totalTokens = 0
@@ -111,6 +113,10 @@ export async function runPhase1_5Alignment(
 
   messages.push(r1Primary, r1Reviewer)
   totalTokens += estimateTokens(r1Primary.position + r1Reviewer.position)
+  dbg.align('round 1 done', {
+    primaryPosition:  r1Primary.position.slice(0, 100),
+    reviewerPosition: r1Reviewer.position.slice(0, 100),
+  })
 
   await Promise.all([
     logAlignmentMessage(projectId, sessionId, r1Primary,  primary.getProvider(), reviewer.getProvider()),
@@ -121,6 +127,7 @@ export async function runPhase1_5Alignment(
   emit({ type: 'alignment_msg', message: r1Reviewer })
 
   mismatchDetected = detectMismatch(r1Primary, r1Reviewer)
+  dbg.align('mismatch detection', { mismatchDetected })
 
   // ─── Round 2 (only if mismatch detected) ────────────────────────────────────
 
@@ -128,6 +135,7 @@ export async function runPhase1_5Alignment(
   let r2Reviewer: AlignmentMessage | null = null
 
   if (mismatchDetected && MAX_ALIGNMENT_ROUNDS >= 2) {
+    dbg.align('mismatch detected — running round 2')
     roundsTaken = 2
 
     // Pass round 1 messages so each model can see what the other said and respond to it
@@ -159,6 +167,7 @@ export async function runPhase1_5Alignment(
 
     // After round 2 the mismatch detection is final
     mismatchDetected = detectMismatch(r2Primary, r2Reviewer)
+    dbg.align('round 2 done', { mismatchStillDetected: mismatchDetected })
   }
 
   // ─── Build shared question list ──────────────────────────────────────────────

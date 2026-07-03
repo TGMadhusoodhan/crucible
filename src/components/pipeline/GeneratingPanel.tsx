@@ -20,14 +20,16 @@ function PhaseStep({ label, active, done }: { label: string; active: boolean; do
   )
 }
 
-// Extract the last === FILE: path === marker seen so far in the stream
 function detectCurrentFile(code: string): string | null {
   const match = [...code.matchAll(/=== FILE: (.+?) ===/g)].at(-1)
   return match ? match[1]!.trim() : null
 }
 
 export function GeneratingPanel({ label }: { label?: string }) {
-  const { streamingCode, selfCheckOutput, reviewerEdit, coderVerification, phase, round, project } = usePipelineState()
+  const {
+    streamingCode, selfCheckOutput, reviewerEdit, coderVerification,
+    phase, round, project,
+  } = usePipelineState()
   const codeEndRef   = useRef<HTMLDivElement>(null)
   const scrollRafRef = useRef<number | null>(null)
   const [copied, setCopied] = useState(false)
@@ -48,16 +50,16 @@ export function GeneratingPanel({ label }: { label?: string }) {
     setTimeout(() => setCopied(false), 2000)
   }
 
-  const isGenerating    = phase === 'phase3_generating'
-  const isSelfCheck     = phase === 'phase3_self_check'
-  const isReviewing     = phase === 'phase3_reviewing'
-  const isReviewerEdit  = phase === 'phase3_reviewer_edit'
-  const isCoderVerify   = phase === 'phase3_coder_verify'
-  const isConsensus     = phase === 'phase3_consensus'
+  const isGenerating   = phase === 'phase3_generating'
+  const isSelfCheck    = phase === 'phase3_self_check'
+  const isReviewing    = phase === 'phase3_reviewing'
+  const isReviewerEdit = phase === 'phase3_reviewer_edit'
+  const isCoderVerify  = phase === 'phase3_coder_verify'
+  const isConsensus    = phase === 'phase3_consensus'
 
-  const pastGeneration  = !isGenerating && !!streamingCode
-  const pastReview      = isReviewerEdit || isCoderVerify || isConsensus
-  const pastEdit        = isCoderVerify || (isConsensus && !!reviewerEdit)
+  const pastGeneration = !isGenerating && !!streamingCode
+  const pastReview     = isReviewerEdit || isCoderVerify || isConsensus
+  const pastEdit       = isCoderVerify || (isConsensus && !!reviewerEdit)
 
   const headerLabel = label ??
     (isReviewerEdit ? 'Reviewer editing code…' :
