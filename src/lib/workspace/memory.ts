@@ -100,6 +100,19 @@ export function addDecision(workspaceDir: string, decision: CrucibleDecision): v
   })
 }
 
+export function batchAddDecisions(workspaceDir: string, decisions: CrucibleDecision[]): void {
+  if (decisions.length === 0) return
+  const existing = readProjectJson(workspaceDir)
+  const now = new Date().toISOString()
+  writeProjectJson(workspaceDir, {
+    spec:      existing?.spec     ?? null,
+    manifest:  existing?.manifest ?? null,
+    decisions: [...(existing?.decisions ?? []), ...decisions],
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  })
+}
+
 // ─── Registry ─────────────────────────────────────────────────────────────────
 
 export function readRegistry(workspaceDir: string): RegistryEntry[] {

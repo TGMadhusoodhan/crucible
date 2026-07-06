@@ -14,8 +14,8 @@ import { estimateTokens } from '@/lib/utils/tokens'
 import { mergeReviewHunks, applyResolvedHunks } from '@/lib/utils/hunk-merge'
 import { prepareWorkspaceForSession, readWorkspaceFile, writeAcceptedFile } from '@/lib/workspace'
 import {
-  addDecision,
   appendHistory,
+  batchAddDecisions,
   commitCrucibleFiles,
   extractExports,
   hashContent,
@@ -421,20 +421,21 @@ export async function confirmSpec(sessionId: string): Promise<void> {
     Promise.resolve().then(() => {
       updateProjectSpec(workspaceDir, spec, fileManifest)
 
-      // Log every answered question as a decision
+      // Batch all decisions into one write (one read-modify-write instead of N)
       const now = new Date().toISOString()
-      for (const [qId, answerId] of Object.entries(answers ?? {})) {
-        const q    = (questions ?? []).find(q => q.id === qId)
-        const opt  = q?.options.find(o => o.id === answerId)
-        if (!q) continue
-        addDecision(workspaceDir, {
+      const allDecisions = Object.entries(answers ?? {}).flatMap(([qId, answerId]) => {
+        const q   = (questions ?? []).find(q => q.id === qId)
+        const opt = q?.options.find(o => o.id === answerId)
+        if (!q) return []
+        return [{
           timestamp:    now,
           questionId:   qId,
           questionText: q.text,
           answer:       opt?.label ?? answerId,
-          source:       q.is_required ? 'human' : 'auto',
-        })
-      }
+          source:       (q.is_required ? 'human' : 'auto') as 'human' | 'auto',
+        }]
+      })
+      batchAddDecisions(workspaceDir, allDecisions)
 
       appendHistory(workspaceDir, {
         type:      'spec_confirmed',
@@ -527,6 +528,7 @@ export async function resolveArbitration(
     const { code: finalCode } = applyResolvedHunks(baseCode, resolved)
 
     state.acceptedFiles[filename] = finalCode
+    const resolvedAtRound1 = state.round
     state.currentFileIdx += 1
     state.round = 1
     resetPerFileState(state)
@@ -534,11 +536,12 @@ export async function resolveArbitration(
     if (state.workspaceDir) {
       const wd = state.workspaceDir
       appendHistory(wd, { type: 'arbitration', timestamp: new Date().toISOString(), sessionId, filename, choice })
-      writeAcceptedFile(wd, filename, finalCode, sessionId, state.round).catch(() => {})
+      writeAcceptedFile(wd, filename, finalCode, sessionId, resolvedAtRound1).catch(() => {})
     }
   } else if (choice === 'accept') {
     const finalCode = state.patchedCode ?? state.currentFileCode ?? ''
     state.acceptedFiles[filename] = finalCode
+    const resolvedAtRound2 = state.round
     state.currentFileIdx += 1
     state.round = 1
     resetPerFileState(state)
@@ -546,7 +549,7 @@ export async function resolveArbitration(
     if (state.workspaceDir) {
       const wd = state.workspaceDir
       appendHistory(wd, { type: 'arbitration', timestamp: new Date().toISOString(), sessionId, filename, choice })
-      writeAcceptedFile(wd, filename, finalCode, sessionId, state.round).catch(() => {})
+      writeAcceptedFile(wd, filename, finalCode, sessionId, resolvedAtRound2).catch(() => {})
     }
   } else {
     // regenerate — round is uncapped this time; stays on the same file

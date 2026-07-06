@@ -40,21 +40,25 @@ function DriftNotice({ files }: { files: string[] }) {
   )
 }
 
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
 function CrucibleMdPanel({ md }: { md: string }) {
-  // Render markdown sections as simple styled blocks
   const lines  = md.split('\n')
-  const blocks: { type: 'h1' | 'h2' | 'h3' | 'text' | 'code' | 'hr'; content: string }[] = []
-  let inManaged = false
+  const blocks: { type: 'h1' | 'h2' | 'h3' | 'text' | 'hr'; content: string }[] = []
   for (const line of lines) {
-    if (line.startsWith('<!-- crucible:') && line.includes(':start -->')) { inManaged = true; continue }
-    if (line.startsWith('<!-- crucible:') && line.includes(':end -->'))   { inManaged = false; continue }
+    if (line.startsWith('<!-- crucible:')) continue   // strip marker lines
     if (line.startsWith('# '))       blocks.push({ type: 'h1',  content: line.slice(2) })
     else if (line.startsWith('## ')) blocks.push({ type: 'h2',  content: line.slice(3) })
     else if (line.startsWith('### '))blocks.push({ type: 'h3',  content: line.slice(4) })
     else if (line === '---')         blocks.push({ type: 'hr',  content: '' })
     else                             blocks.push({ type: 'text', content: line })
   }
-  void inManaged  // used for control flow only
 
   return (
     <div className="space-y-1 text-sm text-zinc-300">
@@ -64,8 +68,8 @@ function CrucibleMdPanel({ md }: { md: string }) {
         if (b.type === 'h3')   return <h3  key={i} className="mt-2 text-sm font-medium text-zinc-300">{b.content}</h3>
         if (b.type === 'hr')   return <hr  key={i} className="border-zinc-800" />
         if (!b.content.trim()) return <div key={i} className="h-1" />
-        // Render **bold** and `code` inline
-        const rendered = b.content
+        // Escape HTML first, then apply safe bold/code/bullet substitutions
+        const rendered = escapeHtml(b.content)
           .replace(/\*\*([^*]+)\*\*/g, '<strong class="text-zinc-200">$1</strong>')
           .replace(/`([^`]+)`/g, '<code class="rounded bg-zinc-800 px-1 text-xs text-emerald-400">$1</code>')
           .replace(/^- /, '• ')
