@@ -172,8 +172,7 @@ function GitHubSettings({
     finally { setSaving(false) }
   }
 
-  async function handleCreate(e: React.FormEvent) {
-    e.preventDefault()
+  async function handleCreate() {
     if (!newName.trim()) return
     setCreating2(true); setCreateErr('')
     try {
@@ -226,26 +225,28 @@ function GitHubSettings({
         </div>
 
         {creating && (
-          <form onSubmit={handleCreate} className="rounded border border-zinc-800 bg-zinc-900/60 p-3 space-y-2">
+          <div className="rounded border border-zinc-800 bg-zinc-900/60 p-3 space-y-2">
             <p className="text-[11px] text-zinc-500">Create a new private GitHub repo:</p>
             <div className="flex gap-2">
               <input
                 type="text"
                 value={newName}
                 onChange={e => setNewName(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void handleCreate() } }}
                 placeholder="my-project"
                 className="flex-1 rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 font-mono text-xs text-zinc-200 placeholder-zinc-700 focus:border-zinc-500 focus:outline-none"
               />
               <button
-                type="submit"
+                type="button"
                 disabled={!newName.trim() || creating2}
+                onClick={() => void handleCreate()}
                 className="rounded bg-zinc-700 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-600 disabled:opacity-40 transition-colors"
               >
                 {creating2 ? 'Creating…' : 'Create'}
               </button>
             </div>
             {createErr && <p className="text-[11px] text-red-400">{createErr}</p>}
-          </form>
+          </div>
         )}
 
         <div className="space-y-1.5">

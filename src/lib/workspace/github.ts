@@ -107,21 +107,12 @@ async function getHeadSha(workspaceDir: string, token: string): Promise<string> 
   return stdout.trim()
 }
 
-async function remoteBranchExists(workspaceDir: string, tokenUrl: string, branch: string, token: string): Promise<boolean> {
-  try {
-    const { stdout } = await git(workspaceDir, ['ls-remote', '--heads', tokenUrl, `refs/heads/${branch}`], token)
-    return stdout.trim().length > 0
-  } catch {
-    return false
-  }
-}
-
 async function isRepoEmpty(workspaceDir: string, tokenUrl: string, token: string): Promise<boolean> {
   try {
     const { stdout } = await git(workspaceDir, ['ls-remote', '--heads', tokenUrl], token)
     return stdout.trim().length === 0
   } catch {
-    return true
+    return false  // treat unknown state as non-empty — don't write unexpected commits
   }
 }
 
@@ -148,8 +139,6 @@ export async function pushWorkspace(
 ): Promise<PushResult> {
   const tokenUrl = `https://x-access-token:${token}@github.com/${githubRepo}.git`
   const cleanUrl  = `https://github.com/${githubRepo}.git`
-
-  const sha = await getHeadSha(workspaceDir, token)
 
   // First push of a brand-new empty repo: add a README stub
   const empty = await isRepoEmpty(workspaceDir, tokenUrl, token)

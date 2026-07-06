@@ -9,7 +9,11 @@ import type { ApiResponse } from '@/types'
 const patchSchema = z.object({
   githubRepo:     z.string().regex(/^[\w.-]+\/[\w.-]+$/, 'Must be owner/repo format').optional().nullable(),
   githubPushMode: z.enum(['off', 'per_file', 'per_session']).optional(),
-  githubBranch:   z.string().min(1).max(255).optional(),
+  // Reject characters git refuses in branch names: whitespace, ~, ^, :, ?, *, [, \, control chars, leading -
+  githubBranch:   z.string().min(1).max(255)
+    .regex(/^(?![-])[\x21-\x7e]+$/, 'Invalid git branch name')
+    .regex(/^[^\s~^:?*[\\\x00-\x1f\x7f]+$/, 'Invalid git branch name (no spaces or special chars)')
+    .optional(),
 })
 
 export async function GET(

@@ -681,7 +681,7 @@ export async function acceptOutputFile(
           costUsd:   budget.sessionCostUsd,
           files:     Object.keys(output.files),
         })
-        void commitCrucibleFiles(state.workspaceDir, 'crucible: session complete')
+        await commitCrucibleFiles(state.workspaceDir, 'crucible: session complete').catch(() => {})
       } catch { /* non-fatal */ }
     }
 
