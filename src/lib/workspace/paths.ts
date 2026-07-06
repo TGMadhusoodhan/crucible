@@ -15,8 +15,8 @@ export function resolveInWorkspace(workspaceDir: string, relPath: string): strin
   const resolved = path.resolve(workspaceDir, relPath)
   const relative = path.relative(workspaceDir, resolved)
 
-  // A safe path must be relative and not start with '..'
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+  // A safe path must be relative, non-empty (not the root itself), and not start with '..'
+  if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
     throw new Error(`Path traversal rejected: "${relPath}" escapes the workspace`)
   }
 

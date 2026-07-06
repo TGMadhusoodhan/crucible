@@ -10,8 +10,19 @@ const IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', '.next', '.crucible
 
 // ─── Git helpers ──────────────────────────────────────────────────────────────
 
+// GIT_TERMINAL_PROMPT=0 — fail immediately instead of blocking for credentials.
+// Identity vars — required on fresh systems with no global git config.
+const GIT_ENV = {
+  ...process.env,
+  GIT_TERMINAL_PROMPT:  '0',
+  GIT_AUTHOR_NAME:      'Crucible',
+  GIT_AUTHOR_EMAIL:     'crucible@localhost',
+  GIT_COMMITTER_NAME:   'Crucible',
+  GIT_COMMITTER_EMAIL:  'crucible@localhost',
+}
+
 async function git(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
-  return execFileAsync('git', args, { cwd })
+  return execFileAsync('git', args, { cwd, timeout: 10_000, env: GIT_ENV })
 }
 
 async function isGitRepo(dir: string): Promise<boolean> {
@@ -83,7 +94,7 @@ export async function writeAcceptedFile(
   fs.writeFileSync(destPath, code)
 
   try {
-    await git(workspaceDir, ['add', filename])
+    await git(workspaceDir, ['add', '--', filename])
     await git(workspaceDir, ['commit', '-m',
       `crucible: accept ${filename} (session ${sessionId.slice(0, 8)}, round ${round})`])
     const { stdout } = await git(workspaceDir, ['log', '-1', '--format=%h', '--', filename])
