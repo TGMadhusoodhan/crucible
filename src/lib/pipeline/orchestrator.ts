@@ -936,7 +936,7 @@ export async function runPipeline(
     // Returns immediately if already waiting at the gate (client polls after resolution).
     if (state.phase === 'phase3_budget_gate') return
 
-    if (state.budgetMode === 'CRITICAL' && !state.budgetGateCleared && state.phase === 'phase3_generating') {
+    if (state.budgetMode === 'CRITICAL' && !state.budgetGateCleared && state.round === 1 && state.phase === 'phase3_generating') {
       const budget = await getBudgetStatus(state.userId, state.sessionId)
       const filesCompleted = state.currentFileIdx
       const estimatedFileUsd = filesCompleted > 0

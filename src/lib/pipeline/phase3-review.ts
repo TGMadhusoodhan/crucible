@@ -35,11 +35,13 @@ export async function runPhase3Review(
     totalDropped = r1Result.droppedCount
 
     emit({ type: 'review_hunks', actor: 'r1', hunks: r1Hunks })
-    emit({
-      type: 'budget_degradation',
-      reason: 'CONSERVATION mode: R2 reviewer skipped to reduce cost',
-      skipped: ['r2_review', 'cross_review'],
-    })
+    if (round === 1) {
+      emit({
+        type: 'budget_degradation',
+        reason: 'CONSERVATION mode: R2 reviewer skipped to reduce cost',
+        skipped: ['r2_review', 'cross_review'],
+      })
+    }
   } else {
     const [r1Result, r2Result] = await Promise.all([
       r1Adapter.reviewAndPatch(filename, code, spec, manifest, round, previousHunkRecords, compilerErrors, reviewOptions),
