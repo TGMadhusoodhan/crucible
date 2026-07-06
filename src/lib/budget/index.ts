@@ -1,6 +1,6 @@
 import { eq, and } from 'drizzle-orm'
 import { db, schema } from '@/lib/db'
-import { MODEL_PRICING } from '@/lib/adapters/base'
+import { computeCostUsd } from '@/lib/adapters/base'
 import { estimateTokens } from '@/lib/utils/tokens'
 import type { BudgetMode, BudgetStatus, Provider, ProviderBudget } from '@/types'
 
@@ -41,20 +41,9 @@ export async function recordUsage(
   cacheReadTokens?:  number,
   cacheWriteTokens?: number,
 ): Promise<void> {
-  const pricing = MODEL_PRICING[modelId]
-  if (!pricing) return
-
-  // Price cache tokens at their discounted rate when real counts are available.
-  // inputTokens from providers includes cached tokens in the total — subtract them
-  // so they aren't double-billed at full rate.
   const cr = cacheReadTokens  ?? 0
   const cw = cacheWriteTokens ?? 0
-  const uncachedInput = Math.max(0, inputTokens - cr - cw)
-  const costUsd =
-    uncachedInput / 1_000_000 * pricing.input +
-    cr            / 1_000_000 * (pricing.cacheRead  ?? pricing.input  * 0.1) +
-    cw            / 1_000_000 * (pricing.cacheWrite ?? pricing.input  * 1.25) +
-    outputTokens  / 1_000_000 * pricing.output
+  const costUsd  = computeCostUsd(modelId, inputTokens, outputTokens, cr, cw)
   const totalTok = inputTokens + outputTokens
   const ym       = currentYearMonth()
 

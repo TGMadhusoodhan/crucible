@@ -43,10 +43,35 @@ export const MODEL_PRICING: Record<string, { input: number; output: number; cach
 // ─── Streaming usage shape returned by stream() ───────────────────────────────
 
 export interface StreamUsage {
-  tokensIn:         number
+  tokensIn:         number  // TOTAL input tokens (uncached + cache-read + cache-write)
   tokensOut:        number
   cacheReadTokens:  number
   cacheWriteTokens: number
+}
+
+// ─── Shared cost calculator ───────────────────────────────────────────────────
+// Single source of truth — used by both budget/index.ts and orchestrator.ts.
+// tokensIn must be the TOTAL input count (uncached + cached) so that
+// uncached = tokensIn - cacheReadTokens - cacheWriteTokens is correct.
+
+export function computeCostUsd(
+  modelId:          string,
+  tokensIn:         number,
+  tokensOut:        number,
+  cacheReadTokens:  number,
+  cacheWriteTokens: number,
+): number {
+  const pricing = MODEL_PRICING[modelId]
+    ?? MODEL_PRICING[modelId.toLowerCase()]
+    ?? Object.entries(MODEL_PRICING).find(([k]) => k.toLowerCase() === modelId.toLowerCase())?.[1]
+  if (!pricing) return 0
+  const uncached = Math.max(0, tokensIn - cacheReadTokens - cacheWriteTokens)
+  return (
+    uncached         / 1_000_000 * pricing.input +
+    cacheReadTokens  / 1_000_000 * (pricing.cacheRead  ?? pricing.input  * 0.1) +
+    cacheWriteTokens / 1_000_000 * (pricing.cacheWrite ?? pricing.input  * 1.25) +
+    tokensOut        / 1_000_000 * pricing.output
+  )
 }
 
 // ─── System prompts ───────────────────────────────────────────────────────────

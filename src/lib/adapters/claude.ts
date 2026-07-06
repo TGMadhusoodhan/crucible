@@ -171,9 +171,11 @@ export class ClaudeAdapter extends BaseAdapter {
         }
         if (event.type === 'message_start') {
           const u = event.message.usage
-          tokensIn         = u.input_tokens
-          cacheReadTokens  = u.cache_read_input_tokens  ?? 0
+          cacheReadTokens  = u.cache_read_input_tokens    ?? 0
           cacheWriteTokens = u.cache_creation_input_tokens ?? 0
+          // Anthropic's input_tokens = uncached only; normalize to TOTAL so the
+          // subtraction formula in recordUsage/computeCostUsd works for all providers.
+          tokensIn = u.input_tokens + cacheReadTokens + cacheWriteTokens
         }
         if (event.type === 'message_delta') {
           tokensOut = event.usage.output_tokens

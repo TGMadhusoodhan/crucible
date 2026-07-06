@@ -523,9 +523,6 @@ export interface PipelineSessionState {
   // Output
   output?: ConsensusOutput    // kept for filesystem compatibility
 
-  // Spec serialized once after Phase 2 confirm — guaranteed byte-identical across all Phase 3 calls
-  specTextCache?:        string
-
   // Meta
   conversationHistory:    Message[]
   pendingHumanOverrides:  string[]
