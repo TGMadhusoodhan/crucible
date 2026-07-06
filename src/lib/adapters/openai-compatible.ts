@@ -1,47 +1,17 @@
 import OpenAI from 'openai'
-import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions'
-import { generateId } from '@/lib/utils'
 import type {
   AlignmentMessage,
-  CoderVerification,
-  DialogueSummary,
-  PipelineContext,
-  Provider,
-  ReviewEdit,
-  ReviewPayload,
-  SelfCheckOutput,
-  SpecDocument,
   ThinkingOutput,
 } from '@/types'
 import {
   ALIGNMENT_SYSTEM_PROMPT,
-  CODER_DIALOGUE_SYSTEM_PROMPT,
-  CODER_VERIFY_SYSTEM_PROMPT,
-  GENERATION_SYSTEM_PROMPT,
-  REVIEWER_DIALOGUE_SYSTEM_PROMPT,
-  REVIEWER_EDIT_SYSTEM_PROMPT,
-  REVIEWER_SYSTEM_PROMPT,
-  SELF_CHECK_SYSTEM_PROMPT,
   THINKING_SYSTEM_PROMPT,
   BaseAdapter,
   buildAlignmentPrompt,
-  buildCoderDialoguePrompt,
-  buildCoderVerifyPrompt,
-  buildGenerationPrompt,
-  buildOpenAIMessages,
-  buildReviewPrompt,
-  buildReviewerDialoguePrompt,
-  buildReviewerEditPrompt,
-  buildSelfCheckPrompt,
   buildThinkingConversionPrompt,
   buildThinkingPrompt,
   isUnparseableThinkingOutput,
-  parseCoderVerification,
   parseJSON,
-  parseReviewEdit,
-  parseReviewPayload,
-  parseReviewerDialogueResponse,
-  parseSelfCheckOutput,
   parseThinkingOutput,
 } from './base'
 
@@ -136,19 +106,10 @@ export abstract class OpenAICompatibleAdapter extends BaseAdapter {
 
   // ─── Phase 1.5: Alignment ───────────────────────────────────────────────────
 
-  async chat(round: 1 | 2, taskDescription: string, myThinking: ThinkingOutput, otherThinking: ThinkingOutput, previousMessages?: AlignmentMessage[], contextText?: string): Promise<AlignmentMessage> {
-    const prompt = buildAlignmentPrompt(round, taskDescription, myThinking, otherThinking, previousMessages, contextText)
+  async chat(taskDescription: string, otherThinking: ThinkingOutput, myThinking: ThinkingOutput, round: 1 | 2): Promise<AlignmentMessage> {
+    const prompt = buildAlignmentPrompt(round, taskDescription, myThinking, otherThinking, undefined, undefined)
     try {
-      const res = await this.client.chat.completions.create({
-        model:           this.modelId,
-        max_tokens:      2048,
-        ...(this.supportsJsonMode() && { response_format: { type: 'json_object' } }),
-        messages: [
-          { role: 'system', content: ALIGNMENT_SYSTEM_PROMPT },
-          { role: 'user',   content: prompt },
-        ],
-      })
-      const text = res.choices[0]?.message?.content ?? ''
+      const text = await this.completeNonStreaming(ALIGNMENT_SYSTEM_PROMPT, prompt)
       if (!text.trim()) throw new Error('empty response from model — retrying')
       const raw  = parseJSON<Record<string, unknown>>(text, 'alignment')
       if (!raw) throw new Error('alignment response parse failed — retrying')
@@ -158,158 +119,44 @@ export abstract class OpenAICompatibleAdapter extends BaseAdapter {
     }
   }
 
-  // ─── Phase 3: Generation ────────────────────────────────────────────────────
+  // ─── Provider primitives ────────────────────────────────────────────────────
 
-  async *generate(prompt: string, ctx: PipelineContext): AsyncGenerator<string> {
-    // PATCH MODE prompts are self-contained (code + issues inline) — conversation
-    // history adds noise and confuses the model into treating it as a fresh generation.
-    const isPatch  = prompt.startsWith('PATCH MODE')
-    const history  = isPatch ? [] : ctx.history.map(m => ({ role: m.role, content: m.content }))
-    const messages = buildOpenAIMessages(history, prompt, GENERATION_SYSTEM_PROMPT) as ChatCompletionMessageParam[]
+  // No response_format here — this primitive backs both object-shaped (spec,
+  // cross-review) and array-shaped (review-and-patch hunks) JSON calls, and
+  // OpenAI's json_object mode only guarantees a top-level object.
+  protected async completeNonStreaming(systemPrompt: string, userMsg: string): Promise<string> {
+    try {
+      const res = await this.client.chat.completions.create({
+        model:      this.modelId,
+        max_tokens: 8192,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user',   content: userMsg },
+        ],
+      })
+      return res.choices[0]?.message?.content ?? ''
+    } catch (err) {
+      throw this.wrapError(err, 'completeNonStreaming')
+    }
+  }
 
+  protected async stream(systemPrompt: string, userMsg: string, onToken: (token: string) => void): Promise<void> {
     try {
       const stream = await this.client.chat.completions.create({
         model:      this.modelId,
         max_tokens: 16384,
         stream:     true,
-        messages,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user',   content: userMsg },
+        ],
       })
       for await (const chunk of stream) {
         const delta = chunk.choices[0]?.delta?.content
-        if (delta) yield delta
+        if (delta) onToken(delta)
       }
     } catch (err) {
-      throw this.wrapError(err, 'generate')
-    }
-  }
-
-  // ─── Phase 3: Self-Check ────────────────────────────────────────────────────
-
-  async selfCheck(code: string, spec: SpecDocument, pass: 1 | 2, previousIssues?: import('@/types').SelfCheckIssue[]): Promise<SelfCheckOutput> {
-    const MAX_SC_CHARS = 20_000
-    const codeForCheck = code.length > MAX_SC_CHARS
-      ? code.slice(0, MAX_SC_CHARS) + '\n// [truncated — full code in output layer]'
-      : code
-    const prompt = buildSelfCheckPrompt(codeForCheck, spec, pass, previousIssues)
-    try {
-      const res = await this.client.chat.completions.create({
-        model:           this.modelId,
-        max_tokens:      4096,
-        ...(this.supportsJsonMode() && { response_format: { type: 'json_object' } }),
-        messages: [
-          { role: 'system', content: SELF_CHECK_SYSTEM_PROMPT },
-          { role: 'user',   content: prompt },
-        ],
-      })
-      const text = res.choices[0]?.message?.content ?? ''
-      if (!text.trim()) throw new Error('empty response from model — retrying')
-      return parseSelfCheckOutput(text, pass)
-    } catch (err) {
-      throw this.wrapError(err, 'selfCheck')
-    }
-  }
-
-  // ─── Phase 3: Review ────────────────────────────────────────────────────────
-
-  async review(code: string, spec: SpecDocument, round: number, previousReview?: ReviewPayload): Promise<ReviewPayload> {
-    const prompt = buildReviewPrompt(code, spec, round, previousReview)
-    try {
-      const res = await this.client.chat.completions.create({
-        model:           this.modelId,
-        max_tokens:      8192,
-        ...(this.supportsJsonMode() && { response_format: { type: 'json_object' } }),
-        messages: [
-          { role: 'system', content: REVIEWER_SYSTEM_PROMPT },
-          { role: 'user',   content: prompt },
-        ],
-      })
-      const text = res.choices[0]?.message?.content ?? ''
-      if (!text.trim()) throw new Error('empty response from model — retrying')
-      return parseReviewPayload(text, round)
-    } catch (err) {
-      throw this.wrapError(err, 'review')
-    }
-  }
-
-  // ─── Phase 3b: Reviewer Edit ────────────────────────────────────────────────
-
-  async reviewerEdit(code: string, spec: SpecDocument, review: ReviewPayload, round: number): Promise<ReviewEdit> {
-    const prompt = buildReviewerEditPrompt(code, spec, review)
-    try {
-      const res = await this.client.chat.completions.create({
-        model:      this.modelId,
-        max_tokens: 8192,
-        ...(this.supportsJsonMode() && { response_format: { type: 'json_object' } }),
-        messages: [
-          { role: 'system', content: REVIEWER_EDIT_SYSTEM_PROMPT },
-          { role: 'user',   content: prompt },
-        ],
-      })
-      const text = res.choices[0]?.message?.content ?? ''
-      return parseReviewEdit(text)
-    } catch (err) {
-      throw this.wrapError(err, `reviewerEdit:round${round}`)
-    }
-  }
-
-  // ─── Phase 3b: Coder Verify ─────────────────────────────────────────────────
-
-  async coderVerify(originalCode: string, edit: ReviewEdit, mergedCode: string, review: ReviewPayload): Promise<CoderVerification> {
-    const prompt = buildCoderVerifyPrompt(originalCode, edit, mergedCode, review)
-    try {
-      const res = await this.client.chat.completions.create({
-        model:      this.modelId,
-        max_tokens: 4096,
-        ...(this.supportsJsonMode() && { response_format: { type: 'json_object' } }),
-        messages: [
-          { role: 'system', content: CODER_VERIFY_SYSTEM_PROMPT },
-          { role: 'user',   content: prompt },
-        ],
-      })
-      const text = res.choices[0]?.message?.content ?? ''
-      return parseCoderVerification(text)
-    } catch (err) {
-      throw this.wrapError(err, 'coderVerify')
-    }
-  }
-
-  // ─── Phase 3b: Coder Dialogue ───────────────────────────────────────────────
-
-  async coderDialogue(code: string, dialogue: DialogueSummary, verification: CoderVerification): Promise<string> {
-    const prompt = buildCoderDialoguePrompt(code, dialogue, verification)
-    try {
-      const res = await this.client.chat.completions.create({
-        model:      this.modelId,
-        max_tokens: 512,
-        messages: [
-          { role: 'system', content: CODER_DIALOGUE_SYSTEM_PROMPT },
-          { role: 'user',   content: prompt },
-        ],
-      })
-      return res.choices[0]?.message?.content?.trim() ?? 'No response'
-    } catch (err) {
-      throw this.wrapError(err, 'coderDialogue')
-    }
-  }
-
-  // ─── Phase 3b: Reviewer Dialogue ────────────────────────────────────────────
-
-  async reviewerDialogue(code: string, dialogue: DialogueSummary, review: ReviewPayload): Promise<{ response: string; resolved: boolean }> {
-    const prompt = buildReviewerDialoguePrompt(code, dialogue, review)
-    try {
-      const res = await this.client.chat.completions.create({
-        model:      this.modelId,
-        max_tokens: 512,
-        ...(this.supportsJsonMode() && { response_format: { type: 'json_object' } }),
-        messages: [
-          { role: 'system', content: REVIEWER_DIALOGUE_SYSTEM_PROMPT },
-          { role: 'user',   content: prompt },
-        ],
-      })
-      const text = res.choices[0]?.message?.content ?? ''
-      return parseReviewerDialogueResponse(text)
-    } catch (err) {
-      throw this.wrapError(err, 'reviewerDialogue')
+      throw this.wrapError(err, 'stream')
     }
   }
 

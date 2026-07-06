@@ -77,7 +77,7 @@ export function BudgetBar() {
 
   async function saveProviderCap(provider: Provider, capUsd: number) {
     // Optimistic: update the store immediately so the UI reflects the change at once
-    if (budget) dispatch({ type: 'SET_BUDGET', budget: applyCapToBudget(budget, provider, capUsd) })
+    if (budget) dispatch({ type: 'BUDGET_UPDATE', budget: applyCapToBudget(budget, provider, capUsd) })
 
     setSaving(true)
     try {

@@ -1,46 +1,20 @@
 import type {
   AlignmentMessage,
-  CoderVerification,
-  DialogueSummary,
-  PipelineContext,
   Provider,
-  ReviewEdit,
-  ReviewPayload,
-  SelfCheckOutput,
-  SpecDocument,
   ThinkingOutput,
 } from '@/types'
 import {
   ALIGNMENT_SYSTEM_PROMPT,
-  CODER_DIALOGUE_SYSTEM_PROMPT,
-  CODER_VERIFY_SYSTEM_PROMPT,
-  GENERATION_SYSTEM_PROMPT,
-  REVIEWER_DIALOGUE_SYSTEM_PROMPT,
-  REVIEWER_EDIT_SYSTEM_PROMPT,
-  REVIEWER_SYSTEM_PROMPT,
-  SELF_CHECK_SYSTEM_PROMPT,
   THINKING_SYSTEM_PROMPT,
   BaseAdapter,
   buildAlignmentPrompt,
-  buildCoderDialoguePrompt,
-  buildCoderVerifyPrompt,
-  buildReviewPrompt,
-  buildReviewerDialoguePrompt,
-  buildReviewerEditPrompt,
-  buildSelfCheckPrompt,
   buildThinkingConversionPrompt,
   buildThinkingPrompt,
   isUnparseableThinkingOutput,
-  parseCoderVerification,
   parseJSON,
-  parseReviewEdit,
-  parseReviewPayload,
-  parseReviewerDialogueResponse,
-  parseSelfCheckOutput,
   parseThinkingOutput,
 } from './base'
 
-type GeminiContent = { role: 'user' | 'model'; parts: Array<{ text: string }> }
 type GeminiStreamChunk = {
   candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>
 }
@@ -129,10 +103,10 @@ export class GoogleAdapter extends BaseAdapter {
 
   // ─── Phase 1.5: Alignment ───────────────────────────────────────────────────
 
-  async chat(round: 1 | 2, taskDescription: string, myThinking: ThinkingOutput, otherThinking: ThinkingOutput, previousMessages?: AlignmentMessage[], contextText?: string): Promise<AlignmentMessage> {
+  async chat(taskDescription: string, otherThinking: ThinkingOutput, myThinking: ThinkingOutput, round: 1 | 2): Promise<AlignmentMessage> {
     try {
-      const prompt = buildAlignmentPrompt(round, taskDescription, myThinking, otherThinking, previousMessages, contextText)
-      const { text } = await this.geminiGenerate(ALIGNMENT_SYSTEM_PROMPT, prompt, 2048)
+      const prompt = buildAlignmentPrompt(round, taskDescription, myThinking, otherThinking, undefined, undefined)
+      const text = await this.completeNonStreaming(ALIGNMENT_SYSTEM_PROMPT, prompt)
       const raw = parseJSON<Record<string, unknown>>(text, 'alignment')
       if (!raw) throw new Error('alignment response parse failed — retrying')
       return this.makeAlignmentMessage(round, 'primary', raw)
@@ -141,29 +115,27 @@ export class GoogleAdapter extends BaseAdapter {
     }
   }
 
-  // ─── Phase 3: Generation ────────────────────────────────────────────────────
+  // ─── Provider primitives ────────────────────────────────────────────────────
 
-  async *generate(prompt: string, ctx: PipelineContext): AsyncGenerator<string> {
+  protected async completeNonStreaming(systemPrompt: string, userMsg: string): Promise<string> {
     try {
-      const isPatch = prompt.startsWith('PATCH MODE')
-      const contents: GeminiContent[] = isPatch
-        ? []
-        : ctx.history
-            .filter(m => m.role !== 'system')
-            .map(m => ({
-              role: m.role === 'assistant' ? 'model' : 'user',
-              parts: [{ text: m.content }],
-            }))
-      contents.push({ role: 'user', parts: [{ text: prompt }] })
+      const { text } = await this.geminiGenerate(systemPrompt, userMsg, 8192)
+      return text
+    } catch (err) {
+      throw this.wrapErr(err, 'completeNonStreaming')
+    }
+  }
 
+  protected async stream(systemPrompt: string, userMsg: string, onToken: (token: string) => void): Promise<void> {
+    try {
       const res = await fetch(
         `${this.baseUrl}/models/${this.modelId}:streamGenerateContent?key=${this.apiKey}&alt=sse`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            systemInstruction: { parts: [{ text: GENERATION_SYSTEM_PROMPT }] },
-            contents,
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            contents:          [{ role: 'user', parts: [{ text: userMsg }] }],
             generationConfig:  { maxOutputTokens: 32768 },
           }),
         },
@@ -186,88 +158,12 @@ export class GoogleAdapter extends BaseAdapter {
           try {
             const chunk = JSON.parse(line.slice(6)) as GeminiStreamChunk
             const text  = chunk.candidates?.[0]?.content?.parts?.[0]?.text
-            if (text) yield text
+            if (text) onToken(text)
           } catch { /* skip malformed SSE chunks */ }
         }
       }
     } catch (err) {
-      throw this.wrapErr(err, 'generate')
-    }
-  }
-
-  // ─── Phase 3: Self-Check ────────────────────────────────────────────────────
-
-  async selfCheck(code: string, spec: SpecDocument, pass: 1 | 2, previousIssues?: import('@/types').SelfCheckIssue[]): Promise<SelfCheckOutput> {
-    try {
-      const MAX_SC_CHARS = 20_000
-      const codeForCheck = code.length > MAX_SC_CHARS
-        ? code.slice(0, MAX_SC_CHARS) + '\n// [truncated — full code in output layer]'
-        : code
-      const prompt = buildSelfCheckPrompt(codeForCheck, spec, pass, previousIssues)
-      const { text } = await this.geminiGenerate(SELF_CHECK_SYSTEM_PROMPT, prompt, 4096)
-      return parseSelfCheckOutput(text, pass)
-    } catch (err) {
-      throw this.wrapErr(err, 'selfCheck')
-    }
-  }
-
-  // ─── Phase 3: Review ────────────────────────────────────────────────────────
-
-  async review(code: string, spec: SpecDocument, round: number, previousReview?: ReviewPayload): Promise<ReviewPayload> {
-    try {
-      const prompt = buildReviewPrompt(code, spec, round, previousReview)
-      const { text } = await this.geminiGenerate(REVIEWER_SYSTEM_PROMPT, prompt, 8192)
-      return parseReviewPayload(text, round)
-    } catch (err) {
-      throw this.wrapErr(err, 'review')
-    }
-  }
-
-  // ─── Phase 3b: Reviewer Edit ────────────────────────────────────────────────
-
-  async reviewerEdit(code: string, spec: SpecDocument, review: ReviewPayload, round: number): Promise<ReviewEdit> {
-    try {
-      const prompt = buildReviewerEditPrompt(code, spec, review)
-      const { text } = await this.geminiGenerate(REVIEWER_EDIT_SYSTEM_PROMPT, prompt, 8192)
-      return parseReviewEdit(text)
-    } catch (err) {
-      throw this.wrapErr(err, `reviewerEdit:round${round}`)
-    }
-  }
-
-  // ─── Phase 3b: Coder Verify ─────────────────────────────────────────────────
-
-  async coderVerify(originalCode: string, edit: ReviewEdit, mergedCode: string, review: ReviewPayload): Promise<CoderVerification> {
-    try {
-      const prompt = buildCoderVerifyPrompt(originalCode, edit, mergedCode, review)
-      const { text } = await this.geminiGenerate(CODER_VERIFY_SYSTEM_PROMPT, prompt, 4096)
-      return parseCoderVerification(text)
-    } catch (err) {
-      throw this.wrapErr(err, 'coderVerify')
-    }
-  }
-
-  // ─── Phase 3b: Coder Dialogue ───────────────────────────────────────────────
-
-  async coderDialogue(code: string, dialogue: DialogueSummary, verification: CoderVerification): Promise<string> {
-    try {
-      const prompt = buildCoderDialoguePrompt(code, dialogue, verification)
-      const { text } = await this.geminiGenerate(CODER_DIALOGUE_SYSTEM_PROMPT, prompt, 512)
-      return text.trim()
-    } catch (err) {
-      throw this.wrapErr(err, 'coderDialogue')
-    }
-  }
-
-  // ─── Phase 3b: Reviewer Dialogue ────────────────────────────────────────────
-
-  async reviewerDialogue(code: string, dialogue: DialogueSummary, review: ReviewPayload): Promise<{ response: string; resolved: boolean }> {
-    try {
-      const prompt = buildReviewerDialoguePrompt(code, dialogue, review)
-      const { text } = await this.geminiGenerate(REVIEWER_DIALOGUE_SYSTEM_PROMPT, prompt, 512)
-      return parseReviewerDialogueResponse(text)
-    } catch (err) {
-      throw this.wrapErr(err, 'reviewerDialogue')
+      throw this.wrapErr(err, 'stream')
     }
   }
 }

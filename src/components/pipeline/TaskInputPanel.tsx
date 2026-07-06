@@ -25,11 +25,11 @@ export function TaskInputPanel() {
   async function handleStart(e: React.FormEvent) {
     e.preventDefault()
     const t = task.trim()
-    if (!t) return
+    if (!t || !state.project) return
     setError(null)
     setLoading(true)
     try {
-      await startPipeline(t, context.trim() || undefined)
+      await startPipeline(state.project, t, context.trim() || undefined)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start pipeline')
     } finally {
@@ -44,8 +44,8 @@ export function TaskInputPanel() {
         <div className="space-y-1">
           <h2 className="text-lg font-semibold">{state.project.name}</h2>
           <p className="text-xs text-zinc-500">
-            {state.project.primaryModelId} <span className="text-zinc-700">→</span>{' '}
-            {state.project.reviewerModelId}
+            DeepSeek <span className="text-zinc-700">→</span>{' '}
+            {state.project.r1ModelId} + {state.project.r2ModelId}
           </p>
         </div>
 

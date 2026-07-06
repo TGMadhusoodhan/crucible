@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "260cb499-fc17-4922-9d11-c5a0a4ee0881",
+  "id": "31a05ae3-6c69-40ec-9d55-b2994122bf88",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "api_credentials": {
@@ -123,29 +123,29 @@
           "autoincrement": false,
           "default": "''"
         },
-        "primary_provider": {
-          "name": "primary_provider",
+        "r1_provider": {
+          "name": "r1_provider",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
-        "primary_model_id": {
-          "name": "primary_model_id",
+        "r1_model_id": {
+          "name": "r1_model_id",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
-        "reviewer_provider": {
-          "name": "reviewer_provider",
+        "r2_provider": {
+          "name": "r2_provider",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
-        "reviewer_model_id": {
-          "name": "reviewer_model_id",
+        "r2_model_id": {
+          "name": "r2_model_id",
           "type": "text",
           "primaryKey": false,
           "notNull": true,

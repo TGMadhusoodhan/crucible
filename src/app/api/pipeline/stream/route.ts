@@ -20,12 +20,9 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   const GATE_PHASES = new Set([
-    'phase2_answering', 'phase2_spec_confirm', 'conflict_escalated',
-    'paused', 'stopped', 'complete', 'error',
-    // phase3_reviewing is a split point: generation done, reconnect for review + edit + verify + dialogue
-    'phase3_reviewing',
-    // file gate: pipeline pauses here for per-file human review
-    'phase3_file_gate', 'phase3_file_feedback',
+    'phase2_answering', 'phase2_confirm',
+    'phase3_micro_gate', 'phase3_arbitration',
+    'output_gate', 'paused', 'stopped', 'complete', 'error',
   ])
 
   const encoder = new TextEncoder()
@@ -65,8 +62,20 @@ export async function GET(request: Request): Promise<Response> {
 
       const isHumanGate = GATE_PHASES.has(currentState.phase)
         && currentState.phase !== 'paused'
-        && currentState.phase !== 'phase3_reviewing'
       if (isHumanGate) {
+        // Re-hydrate the client store with any gate-specific data it needs to
+        // render the gate UI — necessary when the client reconnects after a page
+        // refresh (store is empty) rather than after a normal pipeline run
+        // (store was populated by the events emitted before the gate closed).
+        if (currentState.phase === 'phase3_micro_gate' && currentState.conflicts?.length) {
+          send({ type: 'hunks_merged', resolved: currentState.resolvedHunks ?? [], conflicts: currentState.conflicts })
+        }
+        if (currentState.phase === 'phase3_arbitration' && currentState.arbitrationPkg) {
+          send({ type: 'arbitration', pkg: currentState.arbitrationPkg })
+        }
+        if (currentState.phase === 'output_gate' && Object.keys(currentState.acceptedFiles).length) {
+          send({ type: 'output_gate_ready', files: currentState.acceptedFiles })
+        }
         send({ type: 'phase_change', phase: currentState.phase })
         close()
         return

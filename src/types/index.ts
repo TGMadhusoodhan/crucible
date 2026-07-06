@@ -179,122 +179,136 @@ export interface SpecDocument {
   confirmed_at?:       string  // ISO8601
 }
 
-// ─── Phase 3 — Generation, Self-Check, Review ────────────────────────────────
+// ─── File Manifest ────────────────────────────────────────────────────────────
 
-export interface SelfCheckIssue {
-  severity: 'high' | 'medium' | 'low'
-  description: string
-  location?: string         // e.g. "line 47" or "handleLogin()"
-  suggested_fix: string     // PLAIN ENGLISH only — max 3 lines, no code syntax
+export interface FileDefinition {
+  filename:  string
+  purpose:   string
+  exports:   string[]
+  imports:   Record<string, string[]>
 }
 
-export interface SelfCheckOutput {
-  pass: 1 | 2          // which pass this is (hard limit at 2)
-  issues: SelfCheckIssue[]
-  all_clear: boolean   // true = no issues found, can proceed to review
-  reasoning: string
+export interface FileManifest {
+  mode:             'single' | 'multi'
+  files:            FileDefinition[]
+  generation_order: string[]
+  reasoning:        string
 }
 
-export const selfCheckOutputSchema = z.object({
-  pass:      z.union([z.literal(1), z.literal(2)]).catch(1 as 1),
-  issues:    z.array(z.object({
-    severity:      z.enum(['high', 'medium', 'low']).catch('medium'),
-    description:   z.string().min(1).catch(''),
-    location:      z.string().optional(),
-    suggested_fix: z.string().catch(''),
+export const fileManifestSchema = z.object({
+  mode:             z.enum(['single', 'multi']).catch('single'),
+  files:            z.array(z.object({
+    filename: z.string().min(1).catch('output.ts'),
+    purpose:  z.string().catch(''),
+    exports:  z.array(z.string()).catch([]),
+    imports:  z.record(z.string(), z.array(z.string())).catch({}),
   })).catch([]),
-  all_clear: z.boolean().catch(false),
-  reasoning: z.string().catch(''),
+  generation_order: z.array(z.string()).catch([]),
+  reasoning:        z.string().catch(''),
 })
 
-export type ReviewFlagSeverity = 'HIGH' | 'MEDIUM' | 'LOW'
-export type ReviewFlagCategory = 'bug' | 'logic' | 'security' | 'performance' | 'edge_case'
+// ─── Review Hunk ──────────────────────────────────────────────────────────────
+// A reviewer's flag PLUS their drop-in code fix.
+// Reviewers always provide both — never a flag without a fix.
 
-export interface ReviewFlag {
-  id: string
-  severity: ReviewFlagSeverity
-  category: ReviewFlagCategory
-  description: string
-  pseudo_code_hint?: string  // plain-English only, max 3 lines — NO code syntax
-  location?: string
+export type ReviewFlagCategory =
+  | 'logic' | 'security' | 'performance' | 'correctness'
+  | 'missing_implementation' | 'edge_case' | 'contract_violation'
+
+export interface ReviewHunk {
+  id:          string
+  filename:    string
+  line_start:  number
+  line_end:    number
+  severity:    'HIGH' | 'MEDIUM' | 'LOW'
+  issue:       string        // what is wrong
+  fixed_code:  string        // drop-in replacement for those exact lines
+  category:    ReviewFlagCategory
+  source?:     'R1' | 'R2' | 'both'
+  confirmed?:  boolean
 }
 
-export interface ReviewPayload {
-  consensus: boolean
-  round: number
-  flags: ReviewFlag[]
-  // Flat arrays derived from flags — kept for simpler rendering
-  critical_bugs:     string[]   // HIGH severity bugs
-  logic_errors:      string[]   // MEDIUM logic issues
-  edge_cases_missed: string[]   // edge case flags
-  pseudo_code_hints: string[]   // all pseudo-code hints in one list
-  reasoning: string
-  dependencies_rechecked: boolean  // must be true in rounds 2+
-}
-
-export const reviewPayloadSchema = z.object({
-  consensus:               z.boolean().catch(false),
-  round:                   z.number().int().min(1).catch(1),
-  flags: z.array(z.object({
-    id:               z.string().catch(''),
-    severity:         z.enum(['HIGH', 'MEDIUM', 'LOW']).catch('MEDIUM'),
-    category:         z.enum(['bug', 'logic', 'security', 'performance', 'edge_case']).catch('bug'),
-    description:      z.string().min(1).catch(''),
-    pseudo_code_hint: z.string().optional(),
-    location:         z.string().optional(),
-  })).catch([]),
-  critical_bugs:           z.array(z.string()).catch([]),
-  logic_errors:            z.array(z.string()).catch([]),
-  edge_cases_missed:       z.array(z.string()).catch([]),
-  pseudo_code_hints:       z.array(z.string()).catch([]),
-  reasoning:               z.string().catch(''),
-  dependencies_rechecked:  z.boolean().catch(false),
+export const reviewHunkSchema = z.object({
+  id:         z.string().catch(() => `h_${Math.random().toString(36).slice(2,8)}`),
+  filename:   z.string().min(1).catch('unknown'),
+  line_start: z.number().int().min(1).catch(1),
+  line_end:   z.number().int().min(1).catch(1),
+  severity:   z.enum(['HIGH', 'MEDIUM', 'LOW']).catch('MEDIUM'),
+  issue:      z.string().catch(''),
+  fixed_code: z.string().catch(''),
+  category:   z.enum([
+    'logic','security','performance','correctness',
+    'missing_implementation','edge_case','contract_violation',
+  ]).catch('logic'),
 })
+
+export const reviewHunksSchema = z.array(reviewHunkSchema).catch([])
+
+// ─── Hunk Conflict ────────────────────────────────────────────────────────────
+
+export interface HunkConflict {
+  id:            string
+  filename:      string
+  line_start:    number
+  line_end:      number
+  r1_hunk:       ReviewHunk
+  r2_hunk:       ReviewHunk
+  original_code: string
+}
+
+// ─── Cross-review Response ────────────────────────────────────────────────────
+
+export type CrossReviewDecision = 'ACCEPT_THEIRS' | 'KEEP_MINE' | 'NEW_FIX'
+
+export interface CrossReviewResponse {
+  conflict_id: string
+  decision:    CrossReviewDecision
+  new_code?:   string
+  reason:      string
+}
+
+export const crossReviewResponseSchema = z.object({
+  conflict_id: z.string().catch(''),
+  decision:    z.enum(['ACCEPT_THEIRS', 'KEEP_MINE', 'NEW_FIX']).catch('KEEP_MINE'),
+  new_code:    z.string().optional(),
+  reason:      z.string().catch(''),
+})
+
+// ─── Resolved Hunk ────────────────────────────────────────────────────────────
+
+export interface ResolvedHunk {
+  filename:   string
+  line_start: number
+  line_end:   number
+  new_code:   string
+  source:     'R1' | 'R2' | 'both' | 'cross_review' | 'human'
+  flag_ids:   string[]
+}
+
+// ─── Arbitration ──────────────────────────────────────────────────────────────
+
+export interface ArbitrationPackage {
+  filename:         string
+  round:            number
+  unresolved_hunks: ReviewHunk[]
+  r1_summary:       string
+  r2_summary:       string
+}
+
+// ─── Hunk Merge Result ────────────────────────────────────────────────────────
+
+export interface HunkMergeResult {
+  resolved:  ResolvedHunk[]
+  conflicts: HunkConflict[]
+}
+
+// ─── Phase 3 — Consensus Output ───────────────────────────────────────────────
 
 export interface ConsensusOutput {
   code: string                        // raw AI response (may contain file delimiters)
   files: Record<string, string>       // parsed multi-file map (filename → content)
-  review: ReviewPayload
   promoted_at: number
   checkpoint_id: string
-}
-
-// ─── Phase 3 — Reviewer Edit + Coder Verify + Dialogue ───────────────────────
-
-export interface ReviewHunk {
-  location:    string   // function name or line reference
-  original:    string   // exact snippet from current code
-  replacement: string   // reviewer's corrected version
-  reason:      string   // one sentence — why this edit
-}
-
-export interface ReviewEdit {
-  hunks:     ReviewHunk[]
-  reasoning: string      // overall explanation
-  resolves:  string[]    // flag IDs from the prior ReviewPayload this edit addresses
-}
-
-export interface CoderVerification {
-  agrees:         boolean
-  accepted_hunks: string[]   // location strings of accepted hunks
-  rejected_hunks: string[]   // location strings of disputed hunks
-  concerns:       string[]   // plain English concerns about rejected hunks
-  first_question?: string    // first dialogue question to reviewer (when agrees=false)
-}
-
-export interface DialogueMessage {
-  actor:    'coder' | 'reviewer'
-  content:  string
-  round:    number
-  resolved?: boolean
-}
-
-export interface DialogueSummary {
-  messages:              DialogueMessage[]
-  rounds:                number
-  resolved:              boolean
-  coderFinalPosition:    string
-  reviewerFinalPosition: string
 }
 
 // ─── Pipeline Context (passed to generate / review) ──────────────────────────
@@ -324,34 +338,64 @@ export interface ModelAdapter {
 
   // Phase 1.5: alignment chat between models (max 2 rounds, enforced at call site)
   chat(
-    round: 1 | 2,
     taskDescription: string,
-    myThinking: ThinkingOutput,
-    otherThinking: ThinkingOutput,
-    previousMessages?: AlignmentMessage[],
-    contextText?: string,
+    otherThinking:   ThinkingOutput,
+    myThinking:      ThinkingOutput,
+    round:           1 | 2,
   ): Promise<AlignmentMessage>
 
-  // Phase 3: code generation — streams tokens
-  generate(prompt: string, ctx: PipelineContext): AsyncGenerator<string>
+  // Phase 2: R1/R2 jointly propose the spec + file manifest
+  proposeSpecAndManifest(
+    taskDescription: string,
+    questions:       Question[],
+    answers:         Record<string, string>,
+    contextText?:    string,
+  ): Promise<{ spec: SpecDocument; manifest: FileManifest }>
 
-  // Phase 3: self-check of own output (max 2 passes, enforced in phase3-generate.ts)
-  selfCheck(code: string, spec: SpecDocument, pass: 1 | 2, previousIssues?: SelfCheckIssue[]): Promise<SelfCheckOutput>
+  // Phase 3: DeepSeek generates the current file — streams tokens
+  generate(
+    filename:       string,
+    fileDef:        FileDefinition,
+    manifest:       FileManifest,
+    spec:           SpecDocument,
+    generatedSoFar: Record<string, string>,
+    contextText:    string | undefined,
+    onToken:        (token: string) => void,
+  ): Promise<{ code: string; tokensOut: number }>
 
-  // Phase 3: cross-model code review — returns structured JSON flags only
-  review(code: string, spec: SpecDocument, round: number, previousReview?: ReviewPayload): Promise<ReviewPayload>
+  // Phase 3: R1/R2 review the generated file and produce drop-in fix hunks
+  reviewAndPatch(
+    filename:        string,
+    code:            string,
+    spec:            SpecDocument,
+    manifest:        FileManifest,
+    round:           number,
+    previousHunks?:  ReviewHunk[],
+  ): Promise<ReviewHunk[]>
 
-  // Phase 3b: reviewer produces surgical code hunks for its own flagged issues
-  reviewerEdit(code: string, spec: SpecDocument, review: ReviewPayload, round: number): Promise<ReviewEdit>
+  // Phase 3: cross-review — evaluate the other reviewer's conflicting hunk
+  crossReview(
+    conflict:   HunkConflict,
+    myHunk:     ReviewHunk,
+    theirHunk:  ReviewHunk,
+  ): Promise<CrossReviewResponse>
 
-  // Phase 3b: coder evaluates whether reviewer's hunks solve the issues
-  coderVerify(originalCode: string, edit: ReviewEdit, mergedCode: string, review: ReviewPayload): Promise<CoderVerification>
+  // Phase 3: DeepSeek mechanically applies reviewer-decided patches to a file —
+  // no judgment, no improvisation, just apply the exact new_code at the exact lines.
+  applyPatch(
+    filename:     string,
+    originalCode: string,
+    hunks:        ResolvedHunk[],
+    onToken:      (token: string) => void,
+  ): Promise<{ code: string; tokensOut: number }>
 
-  // Phase 3b: coder's turn in dialogue
-  coderDialogue(code: string, dialogue: DialogueSummary, verification: CoderVerification): Promise<string>
-
-  // Phase 3b: reviewer's turn in dialogue
-  reviewerDialogue(code: string, dialogue: DialogueSummary, review: ReviewPayload): Promise<{ response: string; resolved: boolean }>
+  // Output gate: human requests an ad-hoc free-text fix to an already-finalized file
+  fixFile(
+    filename:    string,
+    code:        string,
+    instruction: string,
+    onToken:     (token: string) => void,
+  ): Promise<{ code: string; tokensOut: number }>
 
   // Metadata
   getProvider(): Provider
@@ -359,7 +403,7 @@ export interface ModelAdapter {
   estimateCost(inputTokens: number, outputTokens: number): number
 }
 
-// ─── Pipeline State (stored in Redis) ────────────────────────────────────────
+// ─── Pipeline State ───────────────────────────────────────────────────────────
 
 export type PipelinePhase =
   | 'idle'
@@ -367,70 +411,94 @@ export type PipelinePhase =
   | 'phase1_thinking'
   | 'phase1_5_alignment'
   | 'phase2_questions'
-  | 'phase2_answering'
-  | 'phase2_contradictions'
-  | 'phase2_spec'
-  | 'phase2_spec_confirm'
-  | 'phase3_generating'
-  | 'phase3_self_check'
-  | 'phase3_reviewing'
-  | 'phase3_reviewer_edit'
-  | 'phase3_coder_verify'
-  | 'phase3_dialogue'
-  | 'phase3_consensus'
-  | 'phase3_file_gate'
-  | 'phase3_file_feedback'
-  | 'conflict_escalated'
+  | 'phase2_answering'           // HUMAN GATE 1
+  | 'phase2_contradiction_check'
+  | 'phase2_spec_and_manifest'   // R1+R2 propose spec + file manifest
+  | 'phase2_confirm'             // HUMAN GATE 2
+  | 'phase3_generating'          // DeepSeek generates current file
+  | 'phase3_reviewing'           // R1+R2 review+patch in parallel
+  | 'phase3_cross_review'        // R1+R2 evaluate each other's conflicts
+  | 'phase3_micro_gate'          // HUMAN GATE 3 — R1+R2 disagree
+  | 'phase3_patching'            // DeepSeek applies resolved patches
+  | 'phase3_re_review'           // R1+R2 verify patched file
+  | 'phase3_arbitration'         // HUMAN GATE 4 — round 3 exhausted
+  | 'output_gate'                // HUMAN GATE 5 — per-file approval
   | 'complete'
   | 'paused'
   | 'stopped'
   | 'error'
 
 export interface PipelineConfig {
-  primaryProvider: Provider
-  primaryModelId:  string
-  primaryApiKey:   string
+  coderProvider:  'deepseek'
+  coderModelId:   'deepseek-v4-pro'
+  coderApiKey:    string
 
-  reviewerProvider: Provider
-  reviewerModelId:  string
-  reviewerApiKey:   string
+  r1Provider:     Provider
+  r1ModelId:      string
+  r1ApiKey:       string
+
+  r2Provider:     Provider
+  r2ModelId:      string
+  r2ApiKey:       string
 }
 
 export interface PipelineSessionState {
-  sessionId: string
-  projectId: string
-  userId: string                       // Clerk user ID — required for budget tracking
-  phase: PipelinePhase
-  previousPhase?: PipelinePhase        // saved before transitioning to 'paused'
-  config: PipelineConfig
-  round: number                        // generation round (1–3 before escalation)
-  selfCheckPass: number                // 0 | 1 | 2 — enforced ≤ 2
-  taskDescription: string              // original user request
-  contextText?: string                 // Phase 0 codebase context
+  sessionId:   string
+  projectId:   string
+  userId:      string
+  phase:       PipelinePhase
+  previousPhase?: PipelinePhase
+  config:      PipelineConfig
+
+  // Per-file loop tracking
+  currentFileIdx:    number
+  currentFilename:   string | null
+  totalFiles:        number
+  round:             number    // per-file round (1-3)
+
+  // Phase 0
+  taskDescription:   string
+  contextText?:      string
+
+  // Phase 1
   thinkingOutputs?: {
-    primary:  ThinkingOutput
-    reviewer: ThinkingOutput
+    r1: ThinkingOutput
+    r2: ThinkingOutput
   }
-  alignmentResult?: AlignmentResult
-  questions?: Question[]
-  userAnswers?: Record<string, string> // questionId → optionId
-  contradictions?: Contradiction[]
-  spec?: SpecDocument
-  generatedCode?: string
-  generatedFiles?: Record<string, string>   // parsed from generatedCode after consensus
-  currentFileIndex?: number                 // index of file currently at gate (0-based)
-  selfCheckOutput?: SelfCheckOutput
-  lastReview?: ReviewPayload
-  reviewerEdit?: ReviewEdit
-  mergedCode?: string
-  coderVerification?: CoderVerification
-  dialogue?: DialogueSummary
-  output?: ConsensusOutput
-  pendingHumanOverrides: string[]
-  conversationHistory: Message[]
-  budgetMode: BudgetMode
-  createdAt: number
-  updatedAt: number
+
+  // Phase 1.5
+  alignmentMessages?: AlignmentMessage[]
+
+  // Phase 2
+  questions?:        Question[]
+  answers?:          Record<string, string>
+  contradictions?:   Contradiction[]
+  spec?:             SpecDocument
+  fileManifest?:     FileManifest
+
+  // Phase 3 — per-file state
+  currentFileCode?:  string             // DeepSeek generated code for current file
+  r1Hunks?:          ReviewHunk[]       // R1's review hunks for current file
+  r2Hunks?:          ReviewHunk[]       // R2's review hunks for current file
+  conflicts?:        HunkConflict[]     // overlapping hunks
+  resolvedHunks?:    ResolvedHunk[]     // after cross-review + merge
+  patchedCode?:      string             // after DeepSeek applies patches
+  arbitrationPkg?:   ArbitrationPackage
+
+  // Accepted files (all files)
+  acceptedFiles:     Record<string, string>   // filename → final code
+  streamingCode:     string
+
+  // Output
+  output?: ConsensusOutput    // kept for filesystem compatibility
+
+  // Meta
+  conversationHistory:    Message[]
+  pendingHumanOverrides:  string[]
+  budgetMode:             BudgetMode
+  createdAt:              number
+  updatedAt:              number
+  error?:                 string
 }
 
 // ─── Conversation Tab Events ──────────────────────────────────────────────────
@@ -460,7 +528,7 @@ export type ConversationEventType =
   | 'play'
   | 'stop'
 
-export type ConversationActor = Provider | 'human' | 'system'
+export type ConversationActor = Provider | 'human' | 'system' | 'coder'
 export type ConversationIndicator = 'success' | 'error' | 'warning' | 'user' | 'progress'
 
 export interface ConversationEvent {
@@ -569,24 +637,28 @@ export interface BudgetStatus {
 // ─── SSE Events (pipeline → client streaming) ─────────────────────────────────
 
 export type SSEEvent =
-  | { type: 'phase_change';    phase: PipelinePhase }
-  | { type: 'thinking_done';   actor: 'primary' | 'reviewer'; output: ThinkingOutput }
-  | { type: 'alignment_msg';   message: AlignmentMessage }
-  | { type: 'questions_ready'; questions: Question[] }
-  | { type: 'contradiction';   contradiction: Contradiction }
-  | { type: 'spec_ready';      spec: SpecDocument }
-  | { type: 'token';           text: string }
-  | { type: 'self_check_done'; output: SelfCheckOutput }
-  | { type: 'review_done';     review: ReviewPayload }
-  | { type: 'consensus';       output: ConsensusOutput }
-  | { type: 'file_ready';     filename: string; code: string; fileIndex: number; totalFiles: number }
-  | { type: 'file_accepted';  filename: string; code: string; fileIndex: number }
-  | { type: 'files_complete'; acceptedFiles: Record<string, string> }
-  | { type: 'conflict';            review: ReviewPayload; round: number }
-  | { type: 'reviewer_edit_done';  edit: ReviewEdit }
-  | { type: 'coder_verify_done';   verification: CoderVerification }
-  | { type: 'dialogue_msg';        message: DialogueMessage }
-  | { type: 'dialogue_resolved';   mergedCode: string }
-  | { type: 'dialogue_escalated';  summary: DialogueSummary }
-  | { type: 'error';               message: string; phase: PipelinePhase }
+  | { type: 'phase_change';          phase: PipelinePhase }
+  | { type: 'error';                 message: string; phase: PipelinePhase }
   | { type: 'done' }
+  | { type: 'budget_update';         budget: BudgetStatus }
+  | { type: 'heartbeat' }
+  | { type: 'thinking_done';         actor: 'r1' | 'r2'; output: ThinkingOutput }
+  | { type: 'alignment_msg';         message: AlignmentMessage }
+  | { type: 'questions_ready';       questions: Question[] }
+  | { type: 'contradiction';         contradiction: Contradiction }
+  | { type: 'spec_ready';            spec: SpecDocument }
+  | { type: 'manifest_ready';        manifest: FileManifest }
+  | { type: 'file_generating';       filename: string; fileIndex: number; totalFiles: number }
+  | { type: 'token';                 text: string }
+  | { type: 'file_generated';        filename: string; code: string }
+  | { type: 'review_hunks';          actor: 'r1' | 'r2'; hunks: ReviewHunk[] }
+  | { type: 'hunks_merged';          resolved: ResolvedHunk[]; conflicts: HunkConflict[] }
+  | { type: 'cross_review_response'; actor: 'r1' | 'r2'; response: CrossReviewResponse }
+  | { type: 'conflicts_resolved';    resolved: ResolvedHunk[] }
+  | { type: 'micro_gate';            conflict: HunkConflict }
+  | { type: 'file_patched';          filename: string; code: string }
+  | { type: 're_review_hunks';       actor: 'r1' | 'r2'; hunks: ReviewHunk[] }
+  | { type: 'file_accepted';         filename: string; code: string }
+  | { type: 'arbitration';           pkg: ArbitrationPackage }
+  | { type: 'output_gate_ready';     files: Record<string, string> }
+  | { type: 'consensus';             output: ConsensusOutput }

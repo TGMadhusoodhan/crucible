@@ -1,45 +1,18 @@
 import Anthropic from '@anthropic-ai/sdk'
-import type { MessageParam } from '@anthropic-ai/sdk/resources/messages/messages'
 import type {
   AlignmentMessage,
-  CoderVerification,
-  DialogueSummary,
-  PipelineContext,
   Provider,
-  ReviewEdit,
-  ReviewPayload,
-  SelfCheckOutput,
-  SpecDocument,
   ThinkingOutput,
 } from '@/types'
 import {
   ALIGNMENT_SYSTEM_PROMPT,
-  CODER_DIALOGUE_SYSTEM_PROMPT,
-  CODER_VERIFY_SYSTEM_PROMPT,
-  GENERATION_SYSTEM_PROMPT,
-  REVIEWER_DIALOGUE_SYSTEM_PROMPT,
-  REVIEWER_EDIT_SYSTEM_PROMPT,
-  REVIEWER_SYSTEM_PROMPT,
-  SELF_CHECK_SYSTEM_PROMPT,
   THINKING_SYSTEM_PROMPT,
   BaseAdapter,
   buildAlignmentPrompt,
-  buildCoderDialoguePrompt,
-  buildCoderVerifyPrompt,
-  buildGenerationPrompt,
-  buildReviewPrompt,
-  buildReviewerDialoguePrompt,
-  buildReviewerEditPrompt,
-  buildSelfCheckPrompt,
   buildThinkingConversionPrompt,
   buildThinkingPrompt,
   isUnparseableThinkingOutput,
-  parseCoderVerification,
   parseJSON,
-  parseReviewEdit,
-  parseReviewPayload,
-  parseReviewerDialogueResponse,
-  parseSelfCheckOutput,
   parseThinkingOutput,
 } from './base'
 
@@ -141,19 +114,12 @@ export class ClaudeAdapter extends BaseAdapter {
 
   // ─── Phase 1.5: Alignment ───────────────────────────────────────────────────
 
-  async chat(round: 1 | 2, taskDescription: string, myThinking: ThinkingOutput, otherThinking: ThinkingOutput, previousMessages?: AlignmentMessage[], contextText?: string): Promise<AlignmentMessage> {
-    const prompt = buildAlignmentPrompt(round, taskDescription, myThinking, otherThinking, previousMessages, contextText)
+  async chat(taskDescription: string, otherThinking: ThinkingOutput, myThinking: ThinkingOutput, round: 1 | 2): Promise<AlignmentMessage> {
+    const prompt = buildAlignmentPrompt(round, taskDescription, myThinking, otherThinking, undefined, undefined)
     try {
-      const res = await this.client.messages.create({
-        model:      this.modelId,
-        max_tokens: 2048,
-        system:     ALIGNMENT_SYSTEM_PROMPT,
-        messages:   [{ role: 'user', content: prompt }],
-      })
-      const block = res.content[0]
-      const text  = block?.type === 'text' ? block.text : ''
+      const text = await this.completeNonStreaming(ALIGNMENT_SYSTEM_PROMPT, prompt)
       if (!text.trim()) throw new Error('empty response from model — retrying')
-      const raw   = parseJSON<Record<string, unknown>>(text, 'alignment')
+      const raw = parseJSON<Record<string, unknown>>(text, 'alignment')
       if (!raw) throw new Error('alignment response parse failed — retrying')
       return this.makeAlignmentMessage(round, 'reviewer', raw)
     } catch (err) {
@@ -161,150 +127,38 @@ export class ClaudeAdapter extends BaseAdapter {
     }
   }
 
-  // ─── Phase 3: Generation ────────────────────────────────────────────────────
+  // ─── Provider primitives ────────────────────────────────────────────────────
 
-  async *generate(prompt: string, ctx: PipelineContext): AsyncGenerator<string> {
-    const isPatch = prompt.startsWith('PATCH MODE')
-    const messages: MessageParam[] = isPatch
-      ? []
-      : ctx.history
-          .filter(m => m.role !== 'system')
-          .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }))
-    messages.push({ role: 'user', content: prompt })
+  protected async completeNonStreaming(systemPrompt: string, userMsg: string): Promise<string> {
+    try {
+      const res = await this.client.messages.create({
+        model:      this.modelId,
+        max_tokens: 8192,
+        system:     systemPrompt,
+        messages:   [{ role: 'user', content: userMsg }],
+      })
+      const block = res.content[0]
+      return block?.type === 'text' ? block.text : ''
+    } catch (err) {
+      throw wrapErr(err, 'completeNonStreaming', this.modelId)
+    }
+  }
 
+  protected async stream(systemPrompt: string, userMsg: string, onToken: (token: string) => void): Promise<void> {
     try {
       const stream = this.client.messages.stream({
         model:      this.modelId,
         max_tokens: 32768,
-        system:     GENERATION_SYSTEM_PROMPT,
-        messages,
+        system:     systemPrompt,
+        messages:   [{ role: 'user', content: userMsg }],
       })
       for await (const event of stream) {
         if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-          yield event.delta.text
+          onToken(event.delta.text)
         }
       }
     } catch (err) {
-      throw wrapErr(err, 'generate', this.modelId)
-    }
-  }
-
-  // ─── Phase 3: Self-Check ────────────────────────────────────────────────────
-
-  async selfCheck(code: string, spec: SpecDocument, pass: 1 | 2, previousIssues?: import('@/types').SelfCheckIssue[]): Promise<SelfCheckOutput> {
-    const MAX_SC_CHARS = 20_000
-    const codeForCheck = code.length > MAX_SC_CHARS
-      ? code.slice(0, MAX_SC_CHARS) + '\n// [truncated — full code in output layer]'
-      : code
-    const prompt = buildSelfCheckPrompt(codeForCheck, spec, pass, previousIssues)
-    try {
-      const res = await this.client.messages.create({
-        model:      this.modelId,
-        max_tokens: 4096,
-        system:     SELF_CHECK_SYSTEM_PROMPT,
-        messages:   [{ role: 'user', content: prompt }],
-      })
-      const block = res.content[0]
-      const text  = block?.type === 'text' ? block.text : ''
-      if (!text.trim()) throw new Error('empty response from model — retrying')
-      return parseSelfCheckOutput(text, pass)
-    } catch (err) {
-      throw wrapErr(err, 'selfCheck', this.modelId)
-    }
-  }
-
-  // ─── Phase 3: Review ────────────────────────────────────────────────────────
-
-  async review(code: string, spec: SpecDocument, round: number, previousReview?: ReviewPayload): Promise<ReviewPayload> {
-    const prompt = buildReviewPrompt(code, spec, round, previousReview)
-    try {
-      const res = await this.client.messages.create({
-        model:      this.modelId,
-        max_tokens: 8192,
-        system:     REVIEWER_SYSTEM_PROMPT,
-        messages:   [{ role: 'user', content: prompt }],
-      })
-      const block = res.content[0]
-      const text  = block?.type === 'text' ? block.text : ''
-      if (!text.trim()) throw new Error('empty response from model — retrying')
-      return parseReviewPayload(text, round)
-    } catch (err) {
-      throw wrapErr(err, 'review', this.modelId)
-    }
-  }
-
-  // ─── Phase 3b: Reviewer Edit ────────────────────────────────────────────────
-
-  async reviewerEdit(code: string, spec: SpecDocument, review: ReviewPayload, round: number): Promise<ReviewEdit> {
-    const prompt = buildReviewerEditPrompt(code, spec, review)
-    try {
-      const res = await this.client.messages.create({
-        model:      this.modelId,
-        max_tokens: 8192,
-        system:     REVIEWER_EDIT_SYSTEM_PROMPT,
-        messages:   [{ role: 'user', content: prompt }],
-      })
-      const block = res.content[0]
-      const text  = block?.type === 'text' ? block.text : ''
-      return parseReviewEdit(text)
-    } catch (err) {
-      throw wrapErr(err, `reviewerEdit:round${round}`, this.modelId)
-    }
-  }
-
-  // ─── Phase 3b: Coder Verify ─────────────────────────────────────────────────
-
-  async coderVerify(originalCode: string, edit: ReviewEdit, mergedCode: string, review: ReviewPayload): Promise<CoderVerification> {
-    const prompt = buildCoderVerifyPrompt(originalCode, edit, mergedCode, review)
-    try {
-      const res = await this.client.messages.create({
-        model:      this.modelId,
-        max_tokens: 4096,
-        system:     CODER_VERIFY_SYSTEM_PROMPT,
-        messages:   [{ role: 'user', content: prompt }],
-      })
-      const block = res.content[0]
-      const text  = block?.type === 'text' ? block.text : ''
-      return parseCoderVerification(text)
-    } catch (err) {
-      throw wrapErr(err, 'coderVerify', this.modelId)
-    }
-  }
-
-  // ─── Phase 3b: Coder Dialogue ───────────────────────────────────────────────
-
-  async coderDialogue(code: string, dialogue: DialogueSummary, verification: CoderVerification): Promise<string> {
-    const prompt = buildCoderDialoguePrompt(code, dialogue, verification)
-    try {
-      const res = await this.client.messages.create({
-        model:      this.modelId,
-        max_tokens: 512,
-        system:     CODER_DIALOGUE_SYSTEM_PROMPT,
-        messages:   [{ role: 'user', content: prompt }],
-      })
-      const block = res.content[0]
-      return block?.type === 'text' ? block.text.trim() : 'No response'
-    } catch (err) {
-      throw wrapErr(err, 'coderDialogue', this.modelId)
-    }
-  }
-
-  // ─── Phase 3b: Reviewer Dialogue ────────────────────────────────────────────
-
-  async reviewerDialogue(code: string, dialogue: DialogueSummary, review: ReviewPayload): Promise<{ response: string; resolved: boolean }> {
-    const prompt = buildReviewerDialoguePrompt(code, dialogue, review)
-    try {
-      const res = await this.client.messages.create({
-        model:      this.modelId,
-        max_tokens: 512,
-        system:     REVIEWER_DIALOGUE_SYSTEM_PROMPT,
-        messages:   [{ role: 'user', content: prompt }],
-      })
-      const block = res.content[0]
-      const text  = block?.type === 'text' ? block.text : ''
-      return parseReviewerDialogueResponse(text)
-    } catch (err) {
-      throw wrapErr(err, 'reviewerDialogue', this.modelId)
+      throw wrapErr(err, 'stream', this.modelId)
     }
   }
 }

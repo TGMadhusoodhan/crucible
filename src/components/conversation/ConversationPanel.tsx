@@ -8,18 +8,22 @@ import type { ConversationEvent, PipelinePhase } from '@/types'
 // ─── Phase labels ─────────────────────────────────────────────────────────────
 
 const PHASE_LABELS: Partial<Record<PipelinePhase, string>> = {
-  phase1_thinking:      'Thinking',
-  phase1_5_alignment:   'Alignment',
-  phase2_questions:     'Questions',
-  phase2_answering:     'Answering',
-  phase2_spec:          'Spec',
-  phase2_spec_confirm:  'Spec Confirm',
-  phase3_generating:    'Generating',
-  phase3_self_check:    'Self-Check',
-  phase3_reviewing:     'Review',
-  phase3_consensus:     'Consensus',
-  conflict_escalated:   'Conflict',
-  complete:             'Complete',
+  phase1_thinking:            'Thinking',
+  phase1_5_alignment:         'Alignment',
+  phase2_questions:           'Questions',
+  phase2_answering:           'Answering',
+  phase2_contradiction_check: 'Contradiction Check',
+  phase2_spec_and_manifest:   'Spec + Manifest',
+  phase2_confirm:             'Confirm',
+  phase3_generating:          'Generating',
+  phase3_reviewing:           'Reviewing',
+  phase3_cross_review:        'Cross-Review',
+  phase3_micro_gate:          'Micro-Gate',
+  phase3_patching:            'Patching',
+  phase3_re_review:           'Re-Review',
+  phase3_arbitration:         'Arbitration',
+  output_gate:                'Output Gate',
+  complete:                   'Complete',
 }
 
 // ─── Single event row ─────────────────────────────────────────────────────────
@@ -48,6 +52,7 @@ function EventRow({ event }: { event: ConversationEvent }) {
   const actorLabel =
     event.actor === 'human'      ? 'You'       :
     event.actor === 'system'     ? 'System'    :
+    event.actor === 'coder'      ? 'Coder'     :
     event.actor === 'anthropic'  ? 'Claude'    :
     event.actor === 'deepseek'   ? 'DeepSeek'  :
     event.actor === 'openai'     ? 'OpenAI'    :

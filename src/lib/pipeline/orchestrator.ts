@@ -3,34 +3,31 @@ import path from 'path'
 import { getAdapter } from '@/lib/adapters'
 import { getBudgetStatus, recordUsage } from '@/lib/budget'
 import { dbg } from '@/lib/debug'
-import { logBudgetModeChange, logPause, logPlay, logStop } from '@/lib/memory/session-log'
+import { appendSessionLog, logBudgetModeChange, logPause, logPlay, logStop } from '@/lib/memory/session-log'
 import { capturePipelineError } from '@/lib/sentry'
 import { generateId } from '@/lib/utils'
 import { estimateTokens } from '@/lib/utils/tokens'
+import { mergeReviewHunks, applyResolvedHunks } from '@/lib/utils/hunk-merge'
 import { runPhase0Context }        from './phase0-context'
 import { runPhase1Thinking }       from './phase1-thinking'
 import { runPhase1_5Alignment }    from './phase1-5-alignment'
 import { runPhase2Questions }      from './phase2-questions'
 import { detectContradictions }    from './phase2-contradiction'
-import { runPhase2Spec }           from './phase2-spec'
+import { runPhase2SpecAndManifest } from './phase2-spec'
 import { runPhase3Generate }       from './phase3-generate'
 import { runPhase3Review }         from './phase3-review'
-import { runPhase3ReviewerEdit }   from './phase3-reviewer-edit'
-import { runPhase3CoderVerify }    from './phase3-coder-verify'
-import { runPhase3Dialogue }       from './phase3-dialogue'
-import { runPhase3Consensus }      from './phase3-consensus'
-import { consumePendingOverrides } from './human-override'
+import { runPhase3CrossReview }    from './phase3-cross-review'
+import { runPhase3Patch }          from './phase3-patch'
 import type {
+  ArbitrationPackage,
   BudgetMode,
   ConsensusOutput,
   ContextInput,
-  CoderVerification,
-  DialogueSummary,
   PipelineConfig,
   PipelinePhase,
   PipelineSessionState,
-  ReviewEdit,
-  ReviewPayload,
+  Provider,
+  ResolvedHunk,
   SpecDocument,
   SSEEvent,
   ThinkingOutput,
@@ -130,12 +127,14 @@ export async function createSession(params: StartPipelineParams): Promise<string
 
   dbg.orch('createSession', {
     sessionId,
-    projectId:       params.projectId,
-    primaryProvider: params.config.primaryProvider,
-    primaryModelId:  params.config.primaryModelId,
-    reviewerProvider:params.config.reviewerProvider,
-    reviewerModelId: params.config.reviewerModelId,
-    hasContext:      !!contextText,
+    projectId:    params.projectId,
+    coderProvider:params.config.coderProvider,
+    coderModelId: params.config.coderModelId,
+    r1Provider:   params.config.r1Provider,
+    r1ModelId:    params.config.r1ModelId,
+    r2Provider:   params.config.r2Provider,
+    r2ModelId:    params.config.r2ModelId,
+    hasContext:   !!contextText,
   })
 
   const state: PipelineSessionState = {
@@ -144,10 +143,25 @@ export async function createSession(params: StartPipelineParams): Promise<string
     userId:              params.userId,
     phase:               'phase1_thinking',
     config:              params.config,
+
+    currentFileIdx:      0,
+    currentFilename:     null,
+    totalFiles:          0,
     round:               1,
-    selfCheckPass:       0,
+
     taskDescription:     params.taskDescription,
     contextText:         contextText || undefined,
+
+    r1Hunks:             [],
+    r2Hunks:             [],
+    conflicts:           [],
+    resolvedHunks:       [],
+    patchedCode:         undefined,
+    currentFileCode:     undefined,
+
+    acceptedFiles:       {},
+    streamingCode:       '',
+
     pendingHumanOverrides: [],
     conversationHistory: [],
     budgetMode:          params.budgetMode ?? 'FULL',
@@ -203,15 +217,15 @@ export async function submitAnswers(
   if (state.phase !== 'phase2_answering') {
     throw new Error(`Session is not waiting for answers (current phase: ${state.phase})`)
   }
-  state.userAnswers = answers
-  state.phase = 'phase2_contradictions'
+  state.answers = answers
+  state.phase = 'phase2_contradiction_check'
   await saveSessionState(state)
 }
 
 export async function confirmSpec(sessionId: string): Promise<void> {
   const state = await getSessionState(sessionId)
   if (!state) throw new Error(`Session not found: ${sessionId}`)
-  if (state.phase !== 'phase2_spec_confirm') {
+  if (state.phase !== 'phase2_confirm') {
     throw new Error(`Session is not waiting for spec confirmation (current phase: ${state.phase})`)
   }
   if (state.spec) {
@@ -222,28 +236,163 @@ export async function confirmSpec(sessionId: string): Promise<void> {
   await saveSessionState(state)
 }
 
-export async function resolveConflict(
-  sessionId: string,
-  overrideMessage: string,
+// ─── Micro-gate + arbitration resolution (HUMAN GATE 3 / 4) ──────────────────
+// These only mutate + persist state — they do NOT call runPipeline themselves.
+// Every other gate-resolution endpoint in this app (submitAnswers, confirmSpec,
+// play) follows the same pattern: the client reconnects to /api/pipeline/stream
+// afterward, and THAT is what drives runPipeline forward. Calling runPipeline
+// from here too would race the client's reconnect against this background
+// invocation for the same session.
+
+export async function resolveMicroGate(
+  sessionId:  string,
+  conflictId: string,
+  choice:     'R1' | 'R2',
 ): Promise<void> {
   const state = await getSessionState(sessionId)
   if (!state) throw new Error(`Session not found: ${sessionId}`)
-  if (state.phase !== 'conflict_escalated') {
-    throw new Error(`Session is not in conflict_escalated phase (current: ${state.phase})`)
+  if (state.phase !== 'phase3_micro_gate') {
+    throw new Error(`Session is not waiting at the micro-gate (current phase: ${state.phase})`)
   }
-  state.pendingHumanOverrides.push(overrideMessage)
-  state.phase = 'phase3_generating'
-  state.round = 1
-  state.lastReview = undefined
+
+  const conflicts = state.conflicts ?? []
+  const conflict  = conflicts.find(c => c.id === conflictId)
+  if (!conflict) throw new Error(`Conflict not found: ${conflictId}`)
+
+  const chosenHunk = choice === 'R1' ? conflict.r1_hunk : conflict.r2_hunk
+  const resolvedHunk: ResolvedHunk = {
+    filename:   conflict.filename,
+    line_start: conflict.line_start,
+    line_end:   conflict.line_end,
+    new_code:   chosenHunk.fixed_code,
+    source:     'human',
+    flag_ids:   [conflict.r1_hunk.id, conflict.r2_hunk.id],
+  }
+
+  state.resolvedHunks = [...(state.resolvedHunks ?? []), resolvedHunk]
+  state.conflicts     = conflicts.filter(c => c.id !== conflictId)
+
+  if (state.conflicts.length === 0) {
+    state.phase = 'phase3_patching'
+  }
   await saveSessionState(state)
+}
+
+export async function resolveArbitration(
+  sessionId: string,
+  filename:  string,
+  choice:    'r1' | 'r2' | 'accept' | 'regenerate',
+  guidance?: string,
+): Promise<void> {
+  const state = await getSessionState(sessionId)
+  if (!state) throw new Error(`Session not found: ${sessionId}`)
+  if (state.phase !== 'phase3_arbitration') {
+    throw new Error(`Session is not waiting at arbitration (current phase: ${state.phase})`)
+  }
+  const pkg = state.arbitrationPkg
+  if (!pkg) throw new Error('No arbitration package pending for this session')
+
+  const totalFiles = state.fileManifest?.generation_order.length ?? 0
+
+  if (choice === 'r1' || choice === 'r2') {
+    // The human already made the call — apply the chosen side's hunks
+    // deterministically (no LLM judgment needed) and accept immediately.
+    const wantedSource = choice === 'r1' ? 'R1' : 'R2'
+    const chosenHunks  = pkg.unresolved_hunks.filter(h => h.source === wantedSource)
+    const resolved: ResolvedHunk[] = chosenHunks.map(h => ({
+      filename:   h.filename,
+      line_start: h.line_start,
+      line_end:   h.line_end,
+      new_code:   h.fixed_code,
+      source:     'human',
+      flag_ids:   [h.id],
+    }))
+    const baseCode  = state.patchedCode ?? state.currentFileCode ?? ''
+    const finalCode = applyResolvedHunks(baseCode, resolved)
+
+    state.acceptedFiles[filename] = finalCode
+    state.currentFileIdx += 1
+    state.round = 1
+    resetPerFileState(state)
+    state.phase = state.currentFileIdx < totalFiles ? 'phase3_generating' : 'output_gate'
+  } else if (choice === 'accept') {
+    const finalCode = state.patchedCode ?? state.currentFileCode ?? ''
+    state.acceptedFiles[filename] = finalCode
+    state.currentFileIdx += 1
+    state.round = 1
+    resetPerFileState(state)
+    state.phase = state.currentFileIdx < totalFiles ? 'phase3_generating' : 'output_gate'
+  } else {
+    // regenerate — round is uncapped this time; stays on the same file
+    state.round += 1
+    resetPerFileState(state)
+    state.phase = 'phase3_generating'
+  }
+
+  if (guidance) state.pendingHumanOverrides = [...state.pendingHumanOverrides, guidance]
+
+  await saveSessionState(state)
+}
+
+// ─── Output gate (HUMAN GATE 5) ───────────────────────────────────────────────
+// By the time a file reaches the output gate it has already passed the full
+// dual-review loop (or a human already resolved its conflicts). This is the
+// human's final skim before the session is marked complete and persisted.
+
+export async function acceptOutputFile(sessionId: string, filename: string): Promise<{ done: boolean }> {
+  const state = await getSessionState(sessionId)
+  if (!state) throw new Error(`Session not found: ${sessionId}`)
+  if (state.phase !== 'output_gate') {
+    throw new Error(`Session is not waiting at the output gate (current phase: ${state.phase})`)
+  }
+
+  const order  = state.fileManifest?.generation_order ?? Object.keys(state.acceptedFiles)
+  const isLast = order.length === 0 || filename === order[order.length - 1]
+
+  if (isLast) {
+    const output: ConsensusOutput = {
+      code:          JSON.stringify(state.acceptedFiles),
+      files:         state.acceptedFiles,
+      promoted_at:   Date.now(),
+      checkpoint_id: generateId(),
+    }
+    state.output = output
+    state.phase  = 'complete'
+    await saveSessionState(state)
+    await saveProjectOutput(state.userId, state.projectId, output, state.spec ?? null, sessionId)
+    return { done: true }
+  }
+
+  return { done: false }
+}
+
+export async function applyOutputFix(
+  sessionId:   string,
+  filename:    string,
+  instruction: string,
+): Promise<{ code: string; modelId: string }> {
+  const state = await getSessionState(sessionId)
+  if (!state) throw new Error(`Session not found: ${sessionId}`)
+  if (state.phase !== 'output_gate') {
+    throw new Error(`Session is not waiting at the output gate (current phase: ${state.phase})`)
+  }
+  const currentCode = state.acceptedFiles[filename]
+  if (currentCode === undefined) throw new Error(`File not found in accepted output: ${filename}`)
+
+  const coderAdapter = getAdapter(state.config.coderProvider, state.config.coderModelId, state.config.coderApiKey)
+  const { code } = await coderAdapter.fixFile(filename, currentCode, instruction, () => {})
+
+  state.acceptedFiles[filename] = code
+  await saveSessionState(state)
+  return { code, modelId: coderAdapter.getModelId() }
 }
 
 // ─── Alignment skip heuristic ─────────────────────────────────────────────────
 
-function canSkipAlignment(primary: ThinkingOutput, reviewer: ThinkingOutput): boolean {
-  if (primary.understood_as === 'Model returned unparseable output') return false
-  if (reviewer.understood_as === 'Model returned unparseable output') return false
-  const reqCount = [...primary.questions, ...reviewer.questions].filter(q => q.is_required).length
+function canSkipAlignment(r1: ThinkingOutput, r2: ThinkingOutput): boolean {
+  if (r1.understood_as === 'Model returned unparseable output') return false
+  if (r2.understood_as === 'Model returned unparseable output') return false
+  const reqCount = [...r1.questions, ...r2.questions].filter(q => q.is_required).length
   if (reqCount > 2) return false
   return true
 }
@@ -273,7 +422,7 @@ function makeEmit(
 
 function recordAndRefreshBudget(
   state:    PipelineSessionState,
-  provider: typeof state.config.primaryProvider,
+  provider: Provider,
   modelId:  string,
   tokensIn: number,
   tokensOut:number,
@@ -306,6 +455,18 @@ async function transition(
   return state
 }
 
+// ─── Per-file state reset (between rounds / after a file is accepted) ────────
+
+function resetPerFileState(state: PipelineSessionState): void {
+  state.currentFileCode = undefined
+  state.r1Hunks          = []
+  state.r2Hunks          = []
+  state.resolvedHunks    = []
+  state.conflicts        = []
+  state.patchedCode      = undefined
+  state.arbitrationPkg   = undefined
+}
+
 // ─── Main pipeline runner (resumable state machine) ──────────────────────────
 
 export async function runPipeline(
@@ -327,22 +488,20 @@ export async function runPipeline(
 
   dbg.orch('runPipeline start', {
     sessionId,
-    phase:           state.phase,
-    primaryProvider: config.primaryProvider,
-    primaryModelId:  config.primaryModelId,
-    reviewerProvider:config.reviewerProvider,
-    reviewerModelId: config.reviewerModelId,
+    phase:        state.phase,
+    coderProvider:config.coderProvider,
+    r1Provider:   config.r1Provider,
+    r2Provider:   config.r2Provider,
   })
 
-  const primary  = getAdapter(config.primaryProvider,  config.primaryModelId,  config.primaryApiKey)
-  const reviewer = getAdapter(config.reviewerProvider, config.reviewerModelId, config.reviewerApiKey)
-
-  dbg.adapter('primary adapter created',   { provider: config.primaryProvider,  modelId: config.primaryModelId })
-  dbg.adapter('reviewer adapter created',  { provider: config.reviewerProvider, modelId: config.reviewerModelId })
+  const coderAdapter = getAdapter(config.coderProvider, config.coderModelId, config.coderApiKey)
+  const r1Adapter     = getAdapter(config.r1Provider,    config.r1ModelId,    config.r1ApiKey)
+  const r2Adapter     = getAdapter(config.r2Provider,    config.r2ModelId,    config.r2ApiKey)
 
   const maybeStop = async (): Promise<boolean> => {
     const signal = await checkControl(sessionId)
     if (signal === 'stop') {
+      state = await transition(state!, 'stopped')
       emit({ type: 'done' })
       return true
     }
@@ -359,28 +518,28 @@ export async function runPipeline(
   if (state.phase === 'phase1_thinking') {
     if (await maybeStop()) return
     dbg.phase1('starting parallel think', {
-      primary:  `${config.primaryProvider}:${config.primaryModelId}`,
-      reviewer: `${config.reviewerProvider}:${config.reviewerModelId}`,
-      taskLen:  state.taskDescription.length,
+      r1: `${config.r1Provider}:${config.r1ModelId}`,
+      r2: `${config.r2Provider}:${config.r2ModelId}`,
+      taskLen: state.taskDescription.length,
     })
 
     try {
       const result = await runPhase1Thinking(
         projectId, sessionId, state.taskDescription,
-        primary, reviewer, emit, state.contextText,
+        r1Adapter, r2Adapter, emit, state.contextText,
       )
-      state.thinkingOutputs = result
+      state.thinkingOutputs = { r1: result.r1, r2: result.r2 }
       dbg.phase1('both models done', {
-        primaryTokens:  result.primary.tokens_used,
-        reviewerTokens: result.reviewer.tokens_used,
-        primaryQs:      result.primary.questions.length,
-        reviewerQs:     result.reviewer.questions.length,
+        r1Tokens: result.r1.tokens_used,
+        r2Tokens: result.r2.tokens_used,
+        r1Qs:     result.r1.questions.length,
+        r2Qs:     result.r2.questions.length,
       })
       const taskTokens = estimateTokens(state.taskDescription)
-      recordAndRefreshBudget(state, config.primaryProvider, config.primaryModelId,
-        taskTokens, result.primary.tokens_used, emit)
-      recordAndRefreshBudget(state, config.reviewerProvider, config.reviewerModelId,
-        taskTokens, result.reviewer.tokens_used, emit)
+      recordAndRefreshBudget(state, config.r1Provider, config.r1ModelId,
+        taskTokens, result.r1.tokens_used, emit)
+      recordAndRefreshBudget(state, config.r2Provider, config.r2ModelId,
+        taskTokens, result.r2.tokens_used, emit)
       state = await transition(state, 'phase1_5_alignment')
     } catch (err) {
       await handleError(state, err, emit)
@@ -390,37 +549,37 @@ export async function runPipeline(
 
   // ─── Phase 1.5: Alignment ─────────────────────────────────────────────────
 
+  let alignmentMessagesForQuestions = state.alignmentMessages ?? []
+  let agreedQuestionsFromAlignment  = state.thinkingOutputs
+    ? [...state.thinkingOutputs.r1.questions, ...state.thinkingOutputs.r2.questions]
+    : []
+
   if (state.phase === 'phase1_5_alignment') {
     if (await maybeStop()) return
     dbg.align('evaluating alignment skip heuristic')
 
     try {
-      const { primary: pThink, reviewer: rThink } = state.thinkingOutputs!
+      const { r1: r1Think, r2: r2Think } = state.thinkingOutputs!
 
-      if (canSkipAlignment(pThink, rThink)) {
+      if (canSkipAlignment(r1Think, r2Think)) {
         dbg.align('SKIPPED — models agree, moving to phase2_questions')
-        state.alignmentResult = {
-          messages: [],
-          agreed_questions:              [...pThink.questions, ...rThink.questions],
-          agreed_recommendations:        [pThink.recommended_approach].filter(Boolean),
-          unresolved_conflicts:          [],
-          architectural_mismatch_detected: false,
-          rounds_taken:                  1,
-          total_tokens:                  0,
-        }
+        alignmentMessagesForQuestions = []
+        agreedQuestionsFromAlignment  = [...r1Think.questions, ...r2Think.questions]
       } else {
         dbg.align('running alignment rounds')
         const result = await runPhase1_5Alignment(
           projectId, sessionId, state.taskDescription,
-          pThink, rThink, primary, reviewer, emit, state.contextText,
+          r1Think, r2Think, r1Adapter, r2Adapter, emit, state.contextText,
         )
-        state.alignmentResult = result
+        alignmentMessagesForQuestions = result.messages
+        agreedQuestionsFromAlignment  = result.agreed_questions
         dbg.align('alignment done', {
-          rounds:   result.rounds_taken,
-          mismatch: result.architectural_mismatch_detected,
-          conflicts:result.unresolved_conflicts.length,
+          rounds:    result.rounds_taken,
+          mismatch:  result.architectural_mismatch_detected,
+          conflicts: result.unresolved_conflicts.length,
         })
       }
+      state.alignmentMessages = alignmentMessagesForQuestions
       state = await transition(state, 'phase2_questions')
     } catch (err) {
       await handleError(state, err, emit)
@@ -437,31 +596,41 @@ export async function runPipeline(
     try {
       const questions = await runPhase2Questions(
         projectId, sessionId,
-        state.thinkingOutputs!.primary,
-        state.thinkingOutputs!.reviewer,
-        state.alignmentResult!,
+        state.thinkingOutputs!.r1,
+        state.thinkingOutputs!.r2,
+        {
+          messages:                        alignmentMessagesForQuestions,
+          agreed_questions:                agreedQuestionsFromAlignment,
+          agreed_recommendations:          [],
+          unresolved_conflicts:            [],
+          architectural_mismatch_detected: false,
+          rounds_taken:                    alignmentMessagesForQuestions.length > 2 ? 2 : 1,
+          total_tokens:                    0,
+        },
         emit,
       )
       state.questions = questions
 
-      const autoAnswers: Record<string, string> = { ...(state.userAnswers ?? {}) }
+      const autoAnswers: Record<string, string> = { ...(state.answers ?? {}) }
       for (const q of questions) {
         if (!q.is_required && q.recommended_option_id && !autoAnswers[q.id]) {
           autoAnswers[q.id] = q.recommended_option_id
         }
       }
-      state.userAnswers = autoAnswers
+      state.answers = autoAnswers
 
       const hasUnansweredRequired = questions.some(q => q.is_required && !autoAnswers[q.id])
-      const requiredCount  = questions.filter(q => q.is_required).length
-      const totalCount     = questions.length
-      dbg.phase2('questions ready', { total: totalCount, required: requiredCount, needsHuman: hasUnansweredRequired })
+      dbg.phase2('questions ready', {
+        total: questions.length,
+        required: questions.filter(q => q.is_required).length,
+        needsHuman: hasUnansweredRequired,
+      })
 
       if (hasUnansweredRequired) {
         state = await transition(state, 'phase2_answering')
         return
       }
-      state = await transition(state, 'phase2_contradictions')
+      state = await transition(state, 'phase2_contradiction_check')
     } catch (err) {
       await handleError(state, err, emit)
       return
@@ -472,11 +641,11 @@ export async function runPipeline(
 
   // ─── Phase 2: Contradiction detection ────────────────────────────────────
 
-  if (state.phase === 'phase2_contradictions') {
+  if (state.phase === 'phase2_contradiction_check') {
     if (await maybeStop()) return
     dbg.phase2('running contradiction detection')
 
-    const contradictions = detectContradictions(state.questions!, state.userAnswers!)
+    const contradictions = detectContradictions(state.questions!, state.answers!)
     state.contradictions = contradictions
     dbg.phase2('contradiction detection done', { contradictions: contradictions.length })
 
@@ -484,33 +653,28 @@ export async function runPipeline(
       emit({ type: 'contradiction', contradiction: c })
     }
 
-    state = await transition(state, 'phase2_spec')
+    state = await transition(state, 'phase2_spec_and_manifest')
   }
 
-  // ─── Phase 2: Spec generation ─────────────────────────────────────────────
+  // ─── Phase 2: Spec + Manifest (R1 + R2 jointly propose) ──────────────────
 
-  if (state.phase === 'phase2_spec') {
+  if (state.phase === 'phase2_spec_and_manifest') {
     if (await maybeStop()) return
-    dbg.phase2('building spec (deterministic — no model call)')
+    dbg.phase2('R1+R2 proposing spec + manifest')
 
     try {
-      const spec = await runPhase2Spec({
-        projectId,
-        sessionId,
-        taskDescription: state.taskDescription,
-        questions:       state.questions!,
-        userAnswers:     state.userAnswers!,
-        thinkingOutputs: state.thinkingOutputs!,
-        contradictions:  state.contradictions,
-        contextText:     state.contextText,
-      }, emit)
-
-      state.spec = spec
-      dbg.phase2('spec ready — waiting for human confirmation', {
+      const { spec, manifest } = await runPhase2SpecAndManifest(
+        projectId, sessionId, state.taskDescription,
+        state.questions!, state.answers!, r1Adapter, r2Adapter, emit, state.contextText,
+      )
+      state.spec         = spec
+      state.fileManifest = manifest
+      dbg.phase2('spec + manifest ready — waiting for human confirmation', {
         criteria: spec.acceptance_criteria.length,
-        edgeCases:spec.edge_cases.length,
+        edgeCases: spec.edge_cases.length,
+        files:    manifest.files.length,
       })
-      state = await transition(state, 'phase2_spec_confirm')
+      state = await transition(state, 'phase2_confirm')
       return
     } catch (err) {
       await handleError(state, err, emit)
@@ -518,218 +682,199 @@ export async function runPipeline(
     }
   }
 
-  if (state.phase === 'phase2_spec_confirm') {
-    dbg.phase2('GATE: waiting for human spec confirmation')
+  if (state.phase === 'phase2_confirm') {
+    dbg.phase2('GATE: waiting for human spec+manifest confirmation')
     return
   }
 
-  // ─── Phase 3 loop: Generate → Review → ReviewerEdit → CoderVerify → Dialogue ─
+  // ─── Phase 3: per-file generate → review → cross-review → patch loop ────
 
-  while (
-    state.phase === 'phase3_generating'    ||
-    state.phase === 'phase3_self_check'    ||
-    state.phase === 'phase3_reviewing'     ||
-    state.phase === 'phase3_reviewer_edit' ||
-    state.phase === 'phase3_coder_verify'  ||
-    state.phase === 'phase3_dialogue'      ||
-    state.phase === 'phase3_consensus'
-  ) {
+  const getOrder = () => state!.fileManifest?.generation_order ?? ['output.ts']
+
+  async function acceptCurrentFile(): Promise<void> {
+    const filename = getOrder()[state!.currentFileIdx]!
+    const code = state!.patchedCode ?? state!.currentFileCode!
+    state!.acceptedFiles[filename] = code
+    emit({ type: 'file_accepted', filename, code })
+    await appendSessionLog(projectId, sessionId, {
+      phase: 'phase3_re_review', actor: 'system',
+      summary: `File accepted: ${filename}`,
+    })
+  }
+
+  while (state.currentFileIdx < getOrder().length) {
+    const filename    = getOrder()[state.currentFileIdx]!
+    const totalFiles  = getOrder().length
+    state.currentFilename = filename
+    state.totalFiles      = totalFiles
+
     if (await maybeStop()) return
 
-    const overrideText = consumePendingOverrides(state.pendingHumanOverrides)
-    state.pendingHumanOverrides = []
-    const ctx = buildContext(state, overrideText)
+    // ── 3a: Generate ──────────────────────────────────────────────────────
 
-    // ── Generate + Self-Check ────────────────────────────────────────────────
-
-    if (state.phase === 'phase3_generating' || state.phase === 'phase3_self_check') {
+    if (state.phase === 'phase3_generating') {
       try {
-        const genResult = await runPhase3Generate(
-          projectId,
-          sessionId,
-          state.round,
-          ctx,
-          primary,
-          emit,
+        const code = await runPhase3Generate(
+          projectId, sessionId, filename, state.currentFileIdx,
+          totalFiles, state.fileManifest!, state.spec!, coderAdapter,
+          state.acceptedFiles, emit, state.contextText,
         )
-        state.generatedCode      = genResult.code
-        state.generatedFiles     = genResult.files
-        state.selfCheckOutput    = genResult.selfCheckOutput
-        state.reviewerEdit       = undefined
-        state.mergedCode         = undefined
-        state.coderVerification  = undefined
-        state.dialogue           = undefined
-
-        dbg.gen('generation complete', {
-          round:      state.round,
-          codeLen:    genResult.code.length,
-          fileCount:  Object.keys(genResult.files).length,
-          files:      Object.keys(genResult.files),
-          tokensOut:  genResult.tokensOut,
-          costUsd:    genResult.costUsd,
-          allClear:   genResult.selfCheckOutput.all_clear,
-          scIssues:   genResult.selfCheckOutput.issues.length,
-        })
-
-        const genPromptTokens = estimateTokens(ctx.taskDescription)
-          + estimateTokens(JSON.stringify(ctx.spec))
-          + estimateTokens(ctx.history.map(m => m.content).join(' '))
-
-        recordAndRefreshBudget(state, config.primaryProvider, config.primaryModelId,
-          genPromptTokens, genResult.tokensOut, emit)
-
+        state.currentFileCode = code
         state = await transition(state, 'phase3_reviewing')
-        return
       } catch (err) {
         await handleError(state, err, emit)
         return
       }
     }
 
-    if (await maybeStop()) return
-
-    // ── Review ───────────────────────────────────────────────────────────────
+    // ── 3b: R1 + R2 review in parallel ────────────────────────────────────
 
     if (state.phase === 'phase3_reviewing') {
-      const code = state.generatedCode!
-      dbg.review('reviewer cross-validating code', {
-        round:    state.round,
-        reviewer: `${config.reviewerProvider}:${config.reviewerModelId}`,
-        codeLen:  code.length,
-      })
-      let review: ReviewPayload
       try {
-        review = await runPhase3Review(
-          projectId, sessionId, code, ctx, reviewer,
-          state.round, emit, state.lastReview,
-        )
-        state.lastReview = review
-        dbg.review('review done', {
-          round:     state.round,
-          consensus: review.consensus,
-          flags:     review.flags.length,
-          high:      review.flags.filter(f => f.severity === 'HIGH').length,
-          medium:    review.flags.filter(f => f.severity === 'MEDIUM').length,
-          low:       review.flags.filter(f => f.severity === 'LOW').length,
-        })
+        const previousHighHunks = state.round > 1
+          ? [...(state.r1Hunks ?? []), ...(state.r2Hunks ?? [])].filter(h => h.severity === 'HIGH')
+          : undefined
 
-        const now = Date.now()
-        state.conversationHistory = [
-          ...state.conversationHistory,
-          { role: 'assistant' as const, content: `[Round ${state.round} code — ${code.length} chars]`, timestamp: now },
-          {
-            role: 'user' as const,
-            content: `[Round ${state.round} review] ${review.reasoning} Flags: ${
-              review.flags.map(f => `[${f.severity}] ${f.description}`).join(' | ')
-            }`,
-            timestamp: now,
-          },
+        const { r1, r2 } = await runPhase3Review(
+          projectId, sessionId, filename, state.currentFileCode!,
+          state.spec!, state.fileManifest!, state.round,
+          r1Adapter, r2Adapter, emit, previousHighHunks,
+        )
+        state.r1Hunks = r1
+        state.r2Hunks = r2
+
+        const anyHigh = [...r1, ...r2].some(h => h.severity === 'HIGH')
+        if (!anyHigh) {
+          await acceptCurrentFile()
+          state.currentFileIdx += 1
+          state.round = 1
+          resetPerFileState(state)
+          if (state.currentFileIdx < getOrder().length) {
+            state = await transition(state, 'phase3_generating')
+          } else {
+            emit({ type: 'output_gate_ready', files: state.acceptedFiles })
+            state = await transition(state, 'output_gate')
+            return
+          }
+          continue
+        }
+
+        const { resolved, conflicts } = mergeReviewHunks(
+          r1.filter(h => h.severity === 'HIGH'),
+          r2.filter(h => h.severity === 'HIGH'),
+          { [filename]: state.currentFileCode! },
+        )
+
+        state.resolvedHunks = resolved
+        state.conflicts     = conflicts
+
+        emit({ type: 'hunks_merged', resolved, conflicts })
+
+        if (conflicts.length > 0) {
+          state = await transition(state, 'phase3_cross_review')
+        } else {
+          state = await transition(state, 'phase3_patching')
+        }
+      } catch (err) {
+        await handleError(state, err, emit)
+        return
+      }
+    }
+
+    // ── 3c: Cross-review conflicts ────────────────────────────────────────
+
+    if (state.phase === 'phase3_cross_review') {
+      try {
+        const { resolved, stillConflicting } = await runPhase3CrossReview(
+          projectId, sessionId, state.conflicts!, r1Adapter, r2Adapter, emit,
+        )
+
+        state.resolvedHunks = [...(state.resolvedHunks ?? []), ...resolved]
+
+        if (stillConflicting.length > 0) {
+          // micro_gate emitted inside runPhase3CrossReview
+          state.conflicts = stillConflicting
+          state = await transition(state, 'phase3_micro_gate')
+          return
+        }
+
+        state.conflicts = []
+        state = await transition(state, 'phase3_patching')
+      } catch (err) {
+        await handleError(state, err, emit)
+        return
+      }
+    }
+
+    if (state.phase === 'phase3_micro_gate') return
+
+    // ── 3e: DeepSeek applies resolved patches ─────────────────────────────
+
+    if (state.phase === 'phase3_patching') {
+      try {
+        const patchedCode = await runPhase3Patch(
+          projectId, sessionId, filename,
+          state.currentFileCode!, state.resolvedHunks!,
+          coderAdapter, emit,
+        )
+        state.patchedCode = patchedCode
+        state = await transition(state, 'phase3_re_review')
+      } catch (err) {
+        await handleError(state, err, emit)
+        return
+      }
+    }
+
+    // ── 3f: Re-review patched file ────────────────────────────────────────
+
+    if (state.phase === 'phase3_re_review') {
+      try {
+        const { r1: r1New, r2: r2New } = await runPhase3Review(
+          projectId, sessionId, filename, state.patchedCode!,
+          state.spec!, state.fileManifest!, state.round,
+          r1Adapter, r2Adapter, emit,
+        )
+
+        // Tag each hunk with its origin — reviewAndPatch()'s output never sets
+        // .source, and resolveArbitration's 'r1'/'r2' choice depends on it to
+        // pick the right hunks out of pkg.unresolved_hunks.
+        const highRemaining = [
+          ...r1New.filter(h => h.severity === 'HIGH').map(h => ({ ...h, source: 'R1' as const })),
+          ...r2New.filter(h => h.severity === 'HIGH').map(h => ({ ...h, source: 'R2' as const })),
         ]
 
-        const reviewPromptTokens = estimateTokens(code) + estimateTokens(JSON.stringify(ctx.spec))
-        recordAndRefreshBudget(state, config.reviewerProvider, config.reviewerModelId,
-          reviewPromptTokens, estimateTokens(JSON.stringify(review)), emit)
-
-        if (review.consensus) {
-          state = await transition(state, 'phase3_consensus')
+        if (highRemaining.length === 0) {
+          state.currentFileCode = state.patchedCode!
+          await acceptCurrentFile()
+          state.currentFileIdx += 1
+          state.round = 1
+          resetPerFileState(state)
+          if (state.currentFileIdx < getOrder().length) {
+            state = await transition(state, 'phase3_generating')
+          } else {
+            emit({ type: 'output_gate_ready', files: state.acceptedFiles })
+            state = await transition(state, 'output_gate')
+            return
+          }
+        } else if (state.round < 3) {
+          const patched = state.patchedCode!
+          state.round += 1
+          resetPerFileState(state)
+          state.currentFileCode = patched
+          state.r1Hunks = r1New
+          state.r2Hunks = r2New
+          state = await transition(state, 'phase3_reviewing')
         } else {
-          state = await transition(state, 'phase3_reviewer_edit')
-        }
-      } catch (err) {
-        await handleError(state, err, emit)
-        return
-      }
-    }
-
-    if (await maybeStop()) return
-
-    // ── Reviewer Edit ─────────────────────────────────────────────────────────
-
-    if (state.phase === 'phase3_reviewer_edit') {
-      const code   = state.generatedCode!
-      const review = state.lastReview!
-      dbg.edit('reviewer producing surgical edit hunks', {
-        reviewer: `${config.reviewerProvider}:${config.reviewerModelId}`,
-        round:    state.round,
-        flags:    review.flags.filter(f => f.severity !== 'LOW').length,
-      })
-      try {
-        const { edit, mergedCode } = await runPhase3ReviewerEdit(
-          projectId, sessionId, code, review, ctx, reviewer, state.round, emit,
-        )
-        state.reviewerEdit = edit
-        state.mergedCode   = mergedCode
-        dbg.edit('coder fix applied', { hunks: edit.hunks.length, mergedLen: mergedCode.length })
-        state = await transition(state, 'phase3_coder_verify')
-      } catch (err) {
-        await handleError(state, err, emit)
-        return
-      }
-    }
-
-    if (await maybeStop()) return
-
-    // ── Coder Verify ──────────────────────────────────────────────────────────
-
-    if (state.phase === 'phase3_coder_verify') {
-      const code       = state.generatedCode!
-      const edit       = state.reviewerEdit!
-      const mergedCode = state.mergedCode!
-      const review     = state.lastReview!
-      dbg.verify('coder evaluating reviewer hunks', { round: state.round, hunks: edit.hunks.length })
-      try {
-        const verification = await runPhase3CoderVerify(
-          projectId, sessionId, code, edit, mergedCode, review, ctx, primary, state.round, emit,
-        )
-        state.coderVerification = verification
-        dbg.verify('coder verdict', {
-          agrees:   verification.agrees,
-          accepted: verification.accepted_hunks.length,
-          rejected: verification.rejected_hunks.length,
-          concerns: verification.concerns.length,
-        })
-
-        if (verification.agrees) {
-          state.generatedCode = mergedCode
-          state = await transition(state, 'phase3_consensus')
-        } else {
-          state = await transition(state, 'phase3_dialogue')
-        }
-      } catch (err) {
-        await handleError(state, err, emit)
-        return
-      }
-    }
-
-    if (await maybeStop()) return
-
-    // ── Model Dialogue ────────────────────────────────────────────────────────
-
-    if (state.phase === 'phase3_dialogue') {
-      const code         = state.generatedCode!
-      const mergedCode   = state.mergedCode!
-      const edit         = state.reviewerEdit!
-      const verification = state.coderVerification!
-      const review       = state.lastReview!
-      dbg.dialogue('starting coder↔reviewer dialogue', { round: state.round })
-      try {
-        const dialogue = await runPhase3Dialogue(
-          projectId, sessionId, code, mergedCode, edit, verification,
-          review, ctx, primary, reviewer, state.round, emit,
-        )
-        state.dialogue = dialogue
-        dbg.dialogue('dialogue finished', {
-          rounds:   dialogue.rounds,
-          resolved: dialogue.resolved,
-          msgs:     dialogue.messages.length,
-        })
-
-        if (dialogue.resolved) {
-          state.generatedCode = mergedCode
-          state = await transition(state, 'phase3_consensus')
-        } else {
-          dbg.dialogue('ESCALATED TO HUMAN — dialogue unresolved after max rounds')
-          state = await transition(state, 'conflict_escalated')
+          const pkg: ArbitrationPackage = {
+            filename,
+            round: state.round,
+            unresolved_hunks: highRemaining,
+            r1_summary: `R1 flagged ${r1New.filter(h => h.severity === 'HIGH').length} issues`,
+            r2_summary: `R2 flagged ${r2New.filter(h => h.severity === 'HIGH').length} issues`,
+          }
+          state.arbitrationPkg = pkg
+          emit({ type: 'arbitration', pkg })
+          state = await transition(state, 'phase3_arbitration')
           return
         }
       } catch (err) {
@@ -738,80 +883,10 @@ export async function runPipeline(
       }
     }
 
-    if (await maybeStop()) return
-
-    // ── Consensus ─────────────────────────────────────────────────────────────
-
-    if (state.phase === 'phase3_consensus') {
-      const code   = state.generatedCode!
-      const files  = state.generatedFiles ?? { 'output.txt': code }
-      const review = state.lastReview!
-      dbg.consensus('evaluating consensus', { round: state.round, files: Object.keys(files) })
-
-      let decision: Awaited<ReturnType<typeof runPhase3Consensus>>
-      try {
-        const syntheticReview: ReviewPayload = { ...review, consensus: true }
-        decision = await runPhase3Consensus(
-          projectId, sessionId, code, files, syntheticReview, ctx, emit,
-        )
-      } catch (err) {
-        await handleError(state, err, emit)
-        return
-      }
-
-      if (decision.promote) {
-        dbg.consensus('PROMOTED — code reached consensus', {
-          round:     state.round,
-          files:     Object.keys(files),
-          checkpoint:decision.output?.checkpoint_id,
-        })
-        state.output         = decision.output
-        state.generatedFiles = files
-        state.currentFileIndex = 0
-        // Save output metadata (not the actual files — those go to disk on file-accept)
-        saveProjectOutput(state.userId, state.projectId, decision.output!, state.spec ?? null, state.sessionId)
-          .catch(err => console.error('[orchestrator] saveProjectOutput failed:', err))
-        // Transition to file gate — stream closes here, client reconnects after user acts
-        state = await transition(state, 'phase3_file_gate')
-        return
-      }
-
-      dbg.consensus('no consensus yet — looping back to generate', { round: state.round })
-      state = await transition(state, 'conflict_escalated')
-      return
-    }
+    if (state.phase === 'phase3_arbitration') return
   }
 
-  // ── File gate — emit file_ready for current file index ─────────────────────
-  // Reached when client reconnects after the user accepts a file and the gate
-  // advances to the next file (or all files are done).
-
-  if (state.phase === 'phase3_file_gate') {
-    const files     = state.generatedFiles ?? {}
-    const filenames = Object.keys(files)
-    const idx       = state.currentFileIndex ?? 0
-    dbg.consensus('file gate', { idx, totalFiles: filenames.length, remaining: filenames.slice(idx) })
-
-    if (idx >= filenames.length) {
-      // All files accepted — pipeline is complete
-      dbg.consensus('ALL FILES ACCEPTED — pipeline complete')
-      emit({ type: 'files_complete', acceptedFiles: files })
-      emit({ type: 'done' })
-      state = await transition(state, 'complete')
-      return
-    }
-
-    // Emit phase_change first so client's lastPhaseRef becomes 'phase3_file_gate'
-    // (in NO_AUTO_RECONNECT) before the stream closes — prevents reconnect loop.
-    emit({ type: 'phase_change', phase: 'phase3_file_gate' })
-    const filename = filenames[idx]!
-    emit({ type: 'file_ready', filename, code: files[filename]!, fileIndex: idx, totalFiles: filenames.length })
-    emit({ type: 'done' })
-    await saveSessionState(state)
-    return
-  }
-
-  if (state.phase === 'conflict_escalated') return
+  if (state.phase === 'output_gate') return
 }
 
 // ─── Error handler ────────────────────────────────────────────────────────────
@@ -833,36 +908,12 @@ async function handleError(
   })
 
   state.phase = 'error'
+  state.error = message
   await saveSessionState(state)
 
   emit({ type: 'error', message, phase: state.phase })
   emit({ type: 'done' })
 }
 
-// ─── Context builder ─────────────────────────────────────────────────────────
-
-function buildContext(
-  state:        PipelineSessionState,
-  overrideText: string | null,
-) {
-  return {
-    projectId:       state.projectId,
-    sessionId:       state.sessionId,
-    spec:            state.spec!,
-    history:         state.conversationHistory,
-    activeMemory:    {
-      current_module:       state.taskDescription.slice(0, 80),
-      open_questions:       [],
-      file_structure:       {},
-      recent_decisions:     [],
-      current_tech_stack:   [],
-      unresolved_conflicts: [],
-    },
-    contextText:     state.contextText,
-    humanOverrides:  overrideText ? [overrideText] : [],
-    taskDescription: state.taskDescription,
-  }
-}
-
 export { getAdapter }
-export type { PipelineSessionState, PipelineConfig }
+export type { PipelineConfig, PipelineSessionState }

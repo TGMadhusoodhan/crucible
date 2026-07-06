@@ -6,7 +6,7 @@ import { usePipelineState } from '@/store'
 import { cn } from '@/lib/utils'
 
 export function SpecPanel() {
-  const { spec, questions } = usePipelineState()
+  const { spec, fileManifest, questions } = usePipelineState()
   const { confirmSpec }     = usePipeline()
   const [confirming, setConfirming] = useState(false)
   const [error, setError]           = useState<string | null>(null)
@@ -14,7 +14,7 @@ export function SpecPanel() {
   if (!spec) {
     return (
       <div className="flex h-full items-center justify-center">
-        <p className="text-xs text-zinc-600 animate-pulse">Generating spec…</p>
+        <p className="text-xs text-zinc-600 animate-pulse">R1 and R2 proposing spec + file plan…</p>
       </div>
     )
   }
@@ -68,6 +68,33 @@ export function SpecPanel() {
           <h3 className="mb-2 text-xs font-medium text-zinc-400 uppercase tracking-wide">Task</h3>
           <p className="text-sm text-zinc-200">{spec.task_description}</p>
         </div>
+
+        {/* File manifest */}
+        {fileManifest && fileManifest.files.length > 0 && (
+          <div>
+            <h3 className="mb-2 text-xs font-medium text-zinc-400 uppercase tracking-wide">
+              Files to generate ({fileManifest.files.length})
+            </h3>
+            <ul className="space-y-1.5">
+              {fileManifest.generation_order.map((filename) => {
+                const def = fileManifest.files.find(f => f.filename === filename)
+                if (!def) return null
+                return (
+                  <li key={filename} className="rounded border border-zinc-800 bg-zinc-900/40 px-3 py-2">
+                    <p className="font-mono text-xs text-zinc-200">{def.filename}</p>
+                    {def.purpose && <p className="mt-0.5 text-[10px] text-zinc-500">{def.purpose}</p>}
+                    {def.exports.length > 0 && (
+                      <p className="mt-0.5 text-[10px] text-zinc-600">exports: {def.exports.join(', ')}</p>
+                    )}
+                  </li>
+                )
+              })}
+            </ul>
+            {fileManifest.reasoning && (
+              <p className="mt-2 text-[10px] text-zinc-600 italic">{fileManifest.reasoning}</p>
+            )}
+          </div>
+        )}
 
         {/* Acceptance Criteria */}
         {spec.acceptance_criteria.length > 0 && (

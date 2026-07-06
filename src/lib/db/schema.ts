@@ -4,14 +4,15 @@ import { integer, primaryKey, real, sqliteTable, text } from 'drizzle-orm/sqlite
 // Moved from Redis — was project:{userId}:{id} + projects:{userId} set
 
 export const projects = sqliteTable('projects', {
-  id:               text('id').primaryKey(),
-  name:             text('name').notNull(),
-  description:      text('description').notNull().default(''),
-  primaryProvider:  text('primary_provider').notNull(),
-  primaryModelId:   text('primary_model_id').notNull(),
-  reviewerProvider: text('reviewer_provider').notNull(),
-  reviewerModelId:  text('reviewer_model_id').notNull(),
-  createdAt:        integer('created_at').notNull(),  // unix ms
+  id:          text('id').primaryKey(),
+  name:        text('name').notNull(),
+  description: text('description').notNull().default(''),
+  // Coder is always DeepSeek — not stored per-project, only R1/R2 vary.
+  r1Provider:  text('r1_provider').notNull(),
+  r1ModelId:   text('r1_model_id').notNull(),
+  r2Provider:  text('r2_provider').notNull(),
+  r2ModelId:   text('r2_model_id').notNull(),
+  createdAt:   integer('created_at').notNull(),  // unix ms
 })
 
 // ─── API Credentials ──────────────────────────────────────────────────────────

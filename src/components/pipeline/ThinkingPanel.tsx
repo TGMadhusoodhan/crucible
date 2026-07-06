@@ -24,12 +24,12 @@ function ModelCard({
   label:   string
   output:  ThinkingOutput | null
   compact: boolean
-  role:    'coder' | 'reviewer'
+  role:    'r1' | 'r2'
 }) {
   const [showAssumptions, setShowAssumptions] = useState(false)
   const [expanded, setExpanded]               = useState(!compact)
 
-  const railCls = role === 'coder' ? 'bg-coder-600/70' : 'bg-reviewer-600/60'
+  const railCls = role === 'r1' ? 'bg-indigo-600/70' : 'bg-purple-600/60'
 
   return (
     <div className={cn(
@@ -141,7 +141,7 @@ function ModelCard({
 }
 
 export function ThinkingPanel({ compact = false }: { compact?: boolean }) {
-  const { thinkingPrimary, thinkingReviewer, project, phase } = usePipelineState()
+  const { thinkingR1, thinkingR2, project, phase } = usePipelineState()
 
   if (compact) {
     // Sidebar mode — narrow column alongside Q&A or spec
@@ -154,16 +154,16 @@ export function ThinkingPanel({ compact = false }: { compact?: boolean }) {
         </div>
         <div className="flex-1 overflow-y-auto p-2 space-y-2">
           <ModelCard
-            label={project?.primaryModelId ?? 'Primary'}
-            output={thinkingPrimary}
+            label={project?.r1ModelId ?? 'R1'}
+            output={thinkingR1}
             compact
-            role="coder"
+            role="r1"
           />
           <ModelCard
-            label={project?.reviewerModelId ?? 'Reviewer'}
-            output={thinkingReviewer}
+            label={project?.r2ModelId ?? 'R2'}
+            output={thinkingR2}
             compact
-            role="reviewer"
+            role="r2"
           />
         </div>
       </div>
@@ -180,11 +180,11 @@ export function ThinkingPanel({ compact = false }: { compact?: boolean }) {
       </div>
 
       <div className="grid grid-cols-2 gap-4 flex-1 min-h-0">
-        <ModelCard label={project?.primaryModelId ?? 'Primary'}  output={thinkingPrimary}  compact={false} role="coder" />
-        <ModelCard label={project?.reviewerModelId ?? 'Reviewer'} output={thinkingReviewer} compact={false} role="reviewer" />
+        <ModelCard label={project?.r1ModelId ?? 'R1'} output={thinkingR1} compact={false} role="r1" />
+        <ModelCard label={project?.r2ModelId ?? 'R2'} output={thinkingR2} compact={false} role="r2" />
       </div>
 
-      {thinkingPrimary && thinkingReviewer && phase === 'phase1_thinking' && (
+      {thinkingR1 && thinkingR2 && phase === 'phase1_thinking' && (
         <div className="flex items-center gap-2 rounded border border-indigo-800/40 bg-indigo-950/20 px-3 py-2 shrink-0">
           <PulsingDot />
           <span className="text-xs text-indigo-400">Both models done — proceeding…</span>

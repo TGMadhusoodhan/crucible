@@ -9,7 +9,7 @@ const STATUS_DOT: Record<string, string> = {
   idle:             'bg-zinc-600',
   running:          'bg-indigo-400 animate-pulse',
   paused:           'bg-yellow-500',
-  waiting_conflict: 'bg-orange-400 animate-pulse',
+  awaiting_human:   'bg-orange-400 animate-pulse',
   stopped:          'bg-red-500',
 }
 
@@ -17,20 +17,25 @@ const STATUS_LABEL: Record<string, string> = {
   idle:             'Idle',
   running:          'Running',
   paused:           'Paused',
-  waiting_conflict: 'Conflict',
+  awaiting_human:   'Awaiting you',
   stopped:          'Stopped',
 }
+
+const HUMAN_GATE_PHASES = new Set([
+  'phase2_answering', 'phase2_confirm',
+  'phase3_micro_gate', 'phase3_arbitration', 'output_gate',
+])
 
 export function AppNav() {
   const pathname                        = usePathname()
   const { project, phase, isStreaming } = usePipelineState()
 
   const pipelineStatus =
-    isStreaming                              ? 'running'          :
-    phase === 'paused'                       ? 'paused'           :
-    phase === 'stopped'                      ? 'stopped'          :
-    phase === 'conflict_escalated'           ? 'waiting_conflict' :
-    phase !== 'idle' && phase !== 'complete' ? 'running'          : 'idle'
+    HUMAN_GATE_PHASES.has(phase)             ? 'awaiting_human' :
+    isStreaming                              ? 'running'        :
+    phase === 'paused'                       ? 'paused'         :
+    phase === 'stopped'                      ? 'stopped'        :
+    phase !== 'idle' && phase !== 'complete' ? 'running'        : 'idle'
 
   const dotCls    = STATUS_DOT[pipelineStatus]   ?? STATUS_DOT.idle!
   const statusLbl = STATUS_LABEL[pipelineStatus] ?? 'Idle'

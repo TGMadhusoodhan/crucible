@@ -7,7 +7,7 @@ import { usePipeline } from '@/hooks/usePipeline'
 import { cn } from '@/lib/utils'
 
 export function CompletePanel() {
-  const { output, lastReview, acceptedFiles, spec } = usePipelineState()
+  const { output, acceptedFiles, spec, project } = usePipelineState()
   const { startPipeline } = usePipeline()
 
   const [showContinue, setShowContinue]   = useState(false)
@@ -18,8 +18,6 @@ export function CompletePanel() {
   const fileMap    = Object.keys(acceptedFiles).length > 0 ? acceptedFiles : (output?.files ?? {})
   const fileNames  = Object.keys(fileMap)
   const fileCount  = fileNames.length
-  const roundCount = output?.review.round ?? 1
-  const lowNotes   = lastReview?.flags.filter(f => f.severity === 'LOW').length ?? 0
 
   // Build codebase context from accepted files — injected into the follow-up session.
   // Total capped at 35k chars (below the 40k Zod limit) with per-file cap of 4k chars.
@@ -49,8 +47,9 @@ export function CompletePanel() {
     if (!continueTask.trim()) return
     setContinueErr(null)
     setContinuing(true)
+    if (!project) return
     try {
-      await startPipeline(continueTask.trim(), buildContinueContext())
+      await startPipeline(project, continueTask.trim(), buildContinueContext())
     } catch (err) {
       setContinueErr(err instanceof Error ? err.message : 'Failed to start')
       setContinuing(false)
@@ -68,9 +67,7 @@ export function CompletePanel() {
             <span className="font-mono text-sm font-semibold text-zinc-100">Pipeline complete</span>
           </div>
           <p className="font-mono text-[10px] text-zinc-600 leading-relaxed">
-            {fileCount} file{fileCount !== 1 ? 's' : ''} generated
-            {' · '}{roundCount} review round{roundCount !== 1 ? 's' : ''}
-            {lowNotes > 0 && ` · ${lowNotes} low-priority note${lowNotes !== 1 ? 's' : ''}`}
+            {fileCount} file{fileCount !== 1 ? 's' : ''} generated — reviewed by R1 + R2
           </p>
         </div>
 

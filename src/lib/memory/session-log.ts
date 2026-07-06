@@ -7,12 +7,9 @@ import type {
   PipelinePhase,
   Provider,
   Question,
-  ReviewPayload,
-  SelfCheckOutput,
-  SpecDocument,
   ThinkingOutput,
 } from '@/types'
-import { appendSessionLog } from './filesystem'
+import { appendSessionLog as writeSessionLogEvent } from './filesystem'
 
 // ─── Event builder ────────────────────────────────────────────────────────────
 // Every pipeline event that needs to appear in the conversation tab goes
@@ -69,7 +66,7 @@ export async function logPhaseStart(
   const event = makeEvent(sessionId, phase, 'system', 'progress', `Starting ${label}`, {
     type: 'phase_start',
   })
-  appendSessionLog(projectId, event)
+  writeSessionLogEvent(projectId, event)
 }
 
 // ─── Phase 1 — Thinking ───────────────────────────────────────────────────────
@@ -77,10 +74,10 @@ export async function logPhaseStart(
 export async function logThinkingDone(
   projectId: string,
   sessionId: string,
-  actor: 'primary' | 'reviewer',
+  actor: 'r1' | 'r2',
   output: ThinkingOutput,
 ): Promise<void> {
-  const actorLabel = `${actor === 'primary' ? 'Primary' : 'Reviewer'} (${output.model_id})`
+  const actorLabel = `${actor === 'r1' ? 'R1' : 'R2'} (${output.model_id})`
   const summary    = `${actorLabel} thinking done — ${output.questions.length} question(s), ${output.assumptions.length} assumption(s)`
   const fullContent = [
     `Understood as: ${output.understood_as}`,
@@ -98,7 +95,7 @@ export async function logThinkingDone(
     tokensIn:    output.tokens_used,
     fullContent,
   })
-  appendSessionLog(projectId, event)
+  writeSessionLogEvent(projectId, event)
 }
 
 // ─── Phase 1.5 — Alignment ────────────────────────────────────────────────────
@@ -123,7 +120,7 @@ export async function logAlignmentMessage(
         : '',
     ].filter(Boolean).join('\n'),
   })
-  appendSessionLog(projectId, event)
+  writeSessionLogEvent(projectId, event)
 }
 
 export async function logAlignmentConflict(
@@ -136,7 +133,7 @@ export async function logAlignmentConflict(
     type:        'alignment_conflict',
     fullContent: conflictDescription,
   })
-  appendSessionLog(projectId, event)
+  writeSessionLogEvent(projectId, event)
 }
 
 // ─── Phase 2 — Questions ──────────────────────────────────────────────────────
@@ -154,171 +151,7 @@ export async function logQuestionsReady(
     type: 'question_generated',
     fullContent,
   })
-  appendSessionLog(projectId, event)
-}
-
-export async function logUserAnswers(
-  projectId: string,
-  sessionId: string,
-  answers: Record<string, string>,
-  questions: Question[],
-): Promise<void> {
-  const answeredCount = Object.keys(answers).length
-  const summary       = `Human answered ${answeredCount} question(s)`
-  const fullContent   = Object.entries(answers)
-    .map(([qId, optId]) => {
-      const q   = questions.find(q => q.id === qId)
-      const opt = q?.options.find(o => o.id === optId)
-      return `• ${q?.text ?? qId}: ${opt?.label ?? optId}`
-    })
-    .join('\n')
-  const event = makeEvent(sessionId, 'phase2_answering', 'human', 'user', summary, {
-    type: 'user_answer',
-    fullContent,
-  })
-  appendSessionLog(projectId, event)
-}
-
-// ─── Phase 2 — Spec ───────────────────────────────────────────────────────────
-
-export async function logSpecWritten(
-  projectId: string,
-  sessionId: string,
-  spec: SpecDocument,
-): Promise<void> {
-  const summary = `Spec written — ${spec.acceptance_criteria.length} criteria, ${spec.edge_cases.length} edge cases`
-  const event   = makeEvent(sessionId, 'phase2_spec', 'system', 'progress', summary, {
-    type:        'spec_written',
-    fullContent: JSON.stringify(spec, null, 2),
-  })
-  appendSessionLog(projectId, event)
-}
-
-export async function logSpecConfirmed(
-  projectId: string,
-  sessionId: string,
-): Promise<void> {
-  const event = makeEvent(sessionId, 'phase2_spec_confirm', 'human', 'user',
-    'Human confirmed the spec — proceeding to code generation', {
-    type: 'spec_confirmed',
-  })
-  appendSessionLog(projectId, event)
-}
-
-// ─── Phase 3 — Generation ────────────────────────────────────────────────────
-
-export async function logGenerationStart(
-  projectId: string,
-  sessionId: string,
-  round: number,
-  provider: Provider,
-): Promise<void> {
-  const event = makeEvent(sessionId, 'phase3_generating', provider, 'progress',
-    `Generation started (round ${round})`, {
-    type:  'generation_start',
-    round,
-  })
-  appendSessionLog(projectId, event)
-}
-
-export async function logGenerationDone(
-  projectId: string,
-  sessionId: string,
-  round: number,
-  codeLength: number,
-  tokensOut: number,
-  costUsd: number,
-  provider: Provider,
-): Promise<void> {
-  const event = makeEvent(sessionId, 'phase3_generating', provider, 'progress',
-    `Code generated — ${codeLength} chars, ${tokensOut} tokens`, {
-    type:     'generation_output',
-    round,
-    tokensOut,
-    costUsd,
-  })
-  appendSessionLog(projectId, event)
-}
-
-// ─── Phase 3 — Self-Check ─────────────────────────────────────────────────────
-
-export async function logSelfCheck(
-  projectId: string,
-  sessionId: string,
-  output: SelfCheckOutput,
-  costUsd: number,
-  provider: Provider,
-): Promise<void> {
-  const summary = output.all_clear
-    ? `Self-check pass ${output.pass} — all clear`
-    : `Self-check pass ${output.pass} — ${output.issues.length} issue(s) found`
-  const fullContent = [
-    `Pass: ${output.pass}/2`,
-    `All clear: ${output.all_clear}`,
-    output.issues.length ? '\nIssues:' : '',
-    ...output.issues.map(i => `  [${i.severity.toUpperCase()}] ${i.description}\n    Fix: ${i.suggested_fix}`),
-    `\nReasoning: ${output.reasoning}`,
-  ].filter(Boolean).join('\n')
-  const event = makeEvent(sessionId, 'phase3_self_check', provider,
-    output.all_clear ? 'success' : 'warning', summary, {
-    type:        'self_check',
-    round:       output.pass,
-    fullContent,
-    costUsd,
-  })
-  appendSessionLog(projectId, event)
-}
-
-// ─── Phase 3 — Review ────────────────────────────────────────────────────────
-
-export async function logReview(
-  projectId: string,
-  sessionId: string,
-  review: ReviewPayload,
-  costUsd: number,
-  provider: Provider,
-): Promise<void> {
-  const highMed  = review.flags.filter(f => f.severity !== 'LOW').length
-  const low      = review.flags.filter(f => f.severity === 'LOW').length
-  const summary  = review.consensus
-    ? `Review round ${review.round} — consensus reached`
-    : `Review round ${review.round} — ${highMed} HIGH/MEDIUM flag(s), ${low} LOW flag(s)`
-  const fullContent = [
-    `Consensus: ${review.consensus}`,
-    `Round: ${review.round}`,
-    review.flags.length ? '\nFlags:' : 'No flags.',
-    ...review.flags.map(f =>
-      `  [${f.severity}] [${f.category}] ${f.description}` +
-      (f.pseudo_code_hint ? `\n    Hint: ${f.pseudo_code_hint}` : '') +
-      (f.location ? ` (${f.location})` : '')
-    ),
-    `\nReasoning: ${review.reasoning}`,
-  ].filter(Boolean).join('\n')
-  const event = makeEvent(sessionId, 'phase3_reviewing',
-    provider,
-    review.consensus ? 'success' : 'warning',
-    summary, {
-    type:        'review_output',
-    round:       review.round,
-    fullContent,
-    costUsd,
-    isConsensus: review.consensus,
-    isConflict:  !review.consensus,
-  })
-  appendSessionLog(projectId, event)
-}
-
-export async function logOutputPromoted(
-  projectId: string,
-  sessionId: string,
-  checkpointId: string,
-): Promise<void> {
-  const event = makeEvent(sessionId, 'phase3_consensus', 'system', 'success',
-    `Code promoted to output layer (checkpoint: ${checkpointId})`, {
-    type:       'output_promoted',
-    isConsensus: true,
-  })
-  appendSessionLog(projectId, event)
+  writeSessionLogEvent(projectId, event)
 }
 
 // ─── Human override ───────────────────────────────────────────────────────────
@@ -335,40 +168,24 @@ export async function logHumanOverride(
     fullContent:    message,
     isHumanOverride: true,
   })
-  appendSessionLog(projectId, event)
-}
-
-export async function logConflictEscalated(
-  projectId: string,
-  sessionId: string,
-  round: number,
-  reason: string,
-): Promise<void> {
-  const event = makeEvent(sessionId, 'conflict_escalated', 'system', 'error',
-    `Conflict after round ${round} — human escalation required`, {
-    type:        'conflict_escalated',
-    round,
-    fullContent: reason,
-    isConflict:  true,
-  })
-  appendSessionLog(projectId, event)
+  writeSessionLogEvent(projectId, event)
 }
 
 // ─── Pipeline controls ────────────────────────────────────────────────────────
 
 export async function logPause(projectId: string, sessionId: string, phase: PipelinePhase): Promise<void> {
   const event = makeEvent(sessionId, phase, 'human', 'user', 'Pipeline paused by human', { type: 'pause' })
-  appendSessionLog(projectId, event)
+  writeSessionLogEvent(projectId, event)
 }
 
 export async function logPlay(projectId: string, sessionId: string, phase: PipelinePhase): Promise<void> {
   const event = makeEvent(sessionId, phase, 'human', 'user', 'Pipeline resumed', { type: 'play' })
-  appendSessionLog(projectId, event)
+  writeSessionLogEvent(projectId, event)
 }
 
 export async function logStop(projectId: string, sessionId: string, phase: PipelinePhase): Promise<void> {
   const event = makeEvent(sessionId, phase, 'human', 'user', 'Pipeline stopped by human', { type: 'stop' })
-  appendSessionLog(projectId, event)
+  writeSessionLogEvent(projectId, event)
 }
 
 export async function logBudgetModeChange(
@@ -379,5 +196,32 @@ export async function logBudgetModeChange(
 ): Promise<void> {
   const event = makeEvent(sessionId, phase, 'system', 'warning',
     `Budget mode changed to ${newMode}`, { type: 'budget_mode_change', fullContent: `New mode: ${newMode}` })
-  appendSessionLog(projectId, event)
+  writeSessionLogEvent(projectId, event)
+}
+
+// ─── Phase 3 (V3) — per-file generate/review/cross-review/patch loop ─────────
+// Simpler than the phase-specific logXxx() helpers above: these phases run
+// once per file (not once per pipeline run), so a single generic entry point
+// covers all of them instead of one bespoke function per call site.
+
+function inferEventType(phase: PipelinePhase): ConversationEvent['type'] {
+  if (phase === 'phase3_reviewing' || phase === 'phase3_cross_review') return 'review_output'
+  return 'generation_output'
+}
+
+export async function appendSessionLog(
+  projectId: string,
+  sessionId: string,
+  opts: {
+    phase:   PipelinePhase
+    actor:   ConversationActor
+    round?:  number
+    summary: string
+  },
+): Promise<void> {
+  const event = makeEvent(sessionId, opts.phase, opts.actor, 'progress', opts.summary, {
+    type:  inferEventType(opts.phase),
+    round: opts.round,
+  })
+  writeSessionLogEvent(projectId, event)
 }

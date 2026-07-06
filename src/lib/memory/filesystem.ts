@@ -1,6 +1,6 @@
 import fs   from 'fs'
 import path from 'path'
-import type { ConversationEvent, ProjectMemory, ReviewFlag, SpecDocument } from '@/types'
+import type { ConversationEvent, ProjectMemory, SpecDocument } from '@/types'
 import { estimateTokens } from '@/lib/utils/tokens'
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
@@ -136,33 +136,18 @@ export function specExists(projectId: string): boolean {
   return fs.existsSync(path.join(projectDir(projectId), 'spec.json'))
 }
 
-// ─── Review list ─────────────────────────────────────────────────────────────
-
-export function appendReviewList(projectId: string, flag: ReviewFlag): void {
-  ensureDir(projectDir(projectId))
-  fs.appendFileSync(
-    path.join(projectDir(projectId), 'reviews.jsonl'),
-    JSON.stringify(flag) + '\n',
-  )
-}
-
-export function readReviewList(projectId: string): ReviewFlag[] {
-  const file = path.join(projectDir(projectId), 'reviews.jsonl')
-  try {
-    if (!fs.existsSync(file)) return []
-    return fs.readFileSync(file, 'utf8')
-      .trim().split('\n').filter(Boolean)
-      .flatMap(line => { try { return [JSON.parse(line) as ReviewFlag] } catch { return [] } })
-  } catch {
-    return []
-  }
-}
-
 // ─── Output files ─────────────────────────────────────────────────────────────
 
 export function writeOutput(projectId: string, filename: string, content: string): void {
   const outDir  = path.join(projectDir(projectId), 'output')
-  const fullPath = path.join(outDir, filename)
+  // Prevent path traversal — filenames can come from a URL param or a
+  // model-generated manifest, neither of which is trusted. Mirrors the same
+  // resolve+prefix check readOutputFile uses below.
+  const fullPath = path.resolve(outDir, filename)
+  const safeBase = path.resolve(outDir) + path.sep
+  if (!fullPath.startsWith(safeBase) && fullPath !== path.resolve(outDir)) {
+    throw new Error('Invalid filename')
+  }
   ensureDir(path.dirname(fullPath))   // create any intermediate dirs (e.g. src/app/)
   fs.writeFileSync(fullPath, content)
 }

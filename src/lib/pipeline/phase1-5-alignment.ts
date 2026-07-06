@@ -102,11 +102,11 @@ export async function runPhase1_5Alignment(
 
   const [r1Primary, r1Reviewer] = await Promise.all([
     retryWithTimeout(
-      () => primary.chat(1, taskDescription, primaryThinking, reviewerThinking, undefined, contextText),
+      () => primary.chat(taskDescription, reviewerThinking, primaryThinking, 1),
       { timeoutMs: TIMEOUT_DEFAULT_MS, label: 'phase1_5:primary:chat:r1' },
     ),
     retryWithTimeout(
-      () => reviewer.chat(1, taskDescription, reviewerThinking, primaryThinking, undefined, contextText),
+      () => reviewer.chat(taskDescription, primaryThinking, reviewerThinking, 1),
       { timeoutMs: TIMEOUT_DEFAULT_MS, label: 'phase1_5:reviewer:chat:r1' },
     ),
   ])
@@ -138,16 +138,13 @@ export async function runPhase1_5Alignment(
     dbg.align('mismatch detected — running round 2')
     roundsTaken = 2
 
-    // Pass round 1 messages so each model can see what the other said and respond to it
-    const r1Messages = [r1Primary, r1Reviewer]
-
     const [r2p, r2r] = await Promise.all([
       retryWithTimeout(
-        () => primary.chat(2, taskDescription, primaryThinking, reviewerThinking, r1Messages, contextText),
+        () => primary.chat(taskDescription, reviewerThinking, primaryThinking, 2),
         { timeoutMs: TIMEOUT_DEFAULT_MS, label: 'phase1_5:primary:chat:r2' },
       ),
       retryWithTimeout(
-        () => reviewer.chat(2, taskDescription, reviewerThinking, primaryThinking, r1Messages, contextText),
+        () => reviewer.chat(taskDescription, primaryThinking, reviewerThinking, 2),
         { timeoutMs: TIMEOUT_DEFAULT_MS, label: 'phase1_5:reviewer:chat:r2' },
       ),
     ])

@@ -4,7 +4,6 @@ import {
   getSessionState,
   submitAnswers,
   confirmSpec,
-  resolveConflict,
 } from '@/lib/pipeline/orchestrator'
 import { captureApiError } from '@/lib/sentry'
 import type { ApiResponse } from '@/types'
@@ -20,16 +19,9 @@ const confirmSpecSchema = z.object({
   sessionId: z.string().min(1),
 })
 
-const resolveConflictSchema = z.object({
-  type:            z.literal('resolve_conflict'),
-  sessionId:       z.string().min(1),
-  overrideMessage: z.string().min(1).max(2000),
-})
-
 const messageSchema = z.discriminatedUnion('type', [
   answersSchema,
   confirmSpecSchema,
-  resolveConflictSchema,
 ])
 
 export async function POST(request: NextRequest): Promise<NextResponse<ApiResponse>> {
@@ -60,24 +52,13 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       }
 
       case 'confirm_spec': {
-        if (state.phase !== 'phase2_spec_confirm') {
+        if (state.phase !== 'phase2_confirm') {
           return NextResponse.json(
             { success: false, error: `Cannot confirm spec in phase "${state.phase}"` },
             { status: 409 },
           )
         }
         await confirmSpec(msg.sessionId)
-        return NextResponse.json({ success: true, data: { nextAction: 'reconnect_stream' } })
-      }
-
-      case 'resolve_conflict': {
-        if (state.phase !== 'conflict_escalated') {
-          return NextResponse.json(
-            { success: false, error: `Cannot resolve conflict in phase "${state.phase}"` },
-            { status: 409 },
-          )
-        }
-        await resolveConflict(msg.sessionId, msg.overrideMessage)
         return NextResponse.json({ success: true, data: { nextAction: 'reconnect_stream' } })
       }
     }

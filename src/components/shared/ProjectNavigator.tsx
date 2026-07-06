@@ -81,19 +81,21 @@ interface Project {
   id: string
   name: string
   description: string
-  primaryProvider: Provider
-  primaryModelId: string
-  reviewerProvider: Provider
-  reviewerModelId: string
+  r1Provider: Provider
+  r1ModelId: string
+  r2Provider: Provider
+  r2ModelId: string
   createdAt: number
 }
+
+const CODER_PROVIDER = 'deepseek' as const
+const CODER_MODEL_ID  = 'deepseek-v4-pro' as const
 
 // ─── Main navigator ───────────────────────────────────────────────────────────
 
 export function ProjectNavigator() {
   const dispatch              = usePipelineDispatch()
   const { project }           = usePipelineState()
-  const { resetSession }      = usePipeline()
   const [projects, setProjects]   = useState<Project[]>([])
   const [showNew, setShowNew]     = useState(false)
   const [deleting, setDeleting]   = useState<string | null>(null)
@@ -109,31 +111,28 @@ export function ProjectNavigator() {
   useEffect(() => { void loadProjects() }, [loadProjects])
 
   function selectProject(p: Project) {
-    // Abort any running pipeline before switching projects
-    resetSession()
     dispatch({
-      type: 'SET_PROJECT',
+      type: 'SELECT_PROJECT',
       project: {
-        id:               p.id,
-        name:             p.name,
-        primaryProvider:  p.primaryProvider,
-        primaryModelId:   p.primaryModelId,
-        reviewerProvider: p.reviewerProvider,
-        reviewerModelId:  p.reviewerModelId,
+        id:            p.id,
+        name:          p.name,
+        coderProvider: CODER_PROVIDER,
+        coderModelId:  CODER_MODEL_ID,
+        r1Provider:    p.r1Provider,
+        r1ModelId:     p.r1ModelId,
+        r2Provider:    p.r2Provider,
+        r2ModelId:     p.r2ModelId,
       },
     })
-    // Fetch the last stored output from the server (Redis, 1-year TTL).
-    // Works on any device — no local folder required.
+    // Fetch the last stored output from the server (survives restarts, any device).
     fetch(`/api/projects/${p.id}/output`)
       .then((r) => r.json() as Promise<{ success: boolean; data?: { output: ConsensusOutput; spec: SpecDocument | null } | null }>)
       .then((data) => {
         if (data.success && data.data?.output) {
-          dispatch({ type: 'RESTORE_SESSION', output: data.data.output, spec: data.data.spec ?? null })
-        } else {
-          dispatch({ type: 'RESET_SESSION' })
+          dispatch({ type: 'RESTORE_OUTPUT', output: data.data.output, spec: data.data.spec ?? null })
         }
       })
-      .catch(() => dispatch({ type: 'RESET_SESSION' }))
+      .catch(() => { /* no stored output — fresh project, nothing to restore */ })
   }
 
   async function deleteProject(e: React.MouseEvent, id: string) {
@@ -191,7 +190,7 @@ export function ProjectNavigator() {
             >
               <p className="text-xs font-medium truncate">{p.name}</p>
               <p className="text-[10px] text-zinc-600 truncate">
-                {p.primaryModelId} → {p.reviewerModelId}
+                DeepSeek → {p.r1ModelId} + {p.r2ModelId}
               </p>
             </button>
             <button
@@ -228,12 +227,12 @@ interface CredStatus { provider: string; isValid: boolean }
 
 function NewProjectModal({ onClose, onCreated }: { onClose: () => void; onCreated: (project: Project) => void }) {
   const [form, setForm] = useState({
-    name:             '',
-    description:      '',
-    primaryProvider:  'deepseek'  as Provider,
-    primaryModelId:   defaultModelId('deepseek'),
-    reviewerProvider: 'anthropic' as Provider,
-    reviewerModelId:  defaultModelId('anthropic'),
+    name:        '',
+    description: '',
+    r1Provider:  'anthropic' as Provider,
+    r1ModelId:   defaultModelId('anthropic'),
+    r2Provider:  'openai'    as Provider,
+    r2ModelId:   defaultModelId('openai'),
   })
   const [saving,  setSaving] = useState(false)
   const [error,   setError]  = useState('')
@@ -253,17 +252,21 @@ function NewProjectModal({ onClose, onCreated }: { onClose: () => void; onCreate
       .catch(() => { /* non-blocking */ })
   }, [])
 
-  function setPrimaryProvider(provider: Provider) {
-    setForm((f) => ({ ...f, primaryProvider: provider, primaryModelId: defaultModelId(provider) }))
+  function setR1Provider(provider: Provider) {
+    setForm((f) => ({ ...f, r1Provider: provider, r1ModelId: defaultModelId(provider) }))
   }
 
-  function setReviewerProvider(provider: Provider) {
-    setForm((f) => ({ ...f, reviewerProvider: provider, reviewerModelId: defaultModelId(provider) }))
+  function setR2Provider(provider: Provider) {
+    setForm((f) => ({ ...f, r2Provider: provider, r2ModelId: defaultModelId(provider) }))
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!form.name.trim()) { setError('Name is required'); return }
+    if (form.r1Provider === form.r2Provider) {
+      setError('Reviewers must use different providers')
+      return
+    }
     setSaving(true)
     const res  = await fetch('/api/projects', {
       method:  'POST',
@@ -284,7 +287,9 @@ function NewProjectModal({ onClose, onCreated }: { onClose: () => void; onCreate
       <div className="w-full max-w-lg rounded-xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl">
         <h2 className="mb-1 text-sm font-semibold text-zinc-100">New project</h2>
         <p className="mb-4 text-xs text-zinc-500">
-          Recommended: DeepSeek V4 Pro as coder + Claude Sonnet as reviewer.
+          DeepSeek generates code. Reviewer 1 and Reviewer 2 independently review and
+          provide fixes. Conflicting fixes are resolved between the reviewers before
+          DeepSeek applies the agreed-upon changes.
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -298,48 +303,62 @@ function NewProjectModal({ onClose, onCreated }: { onClose: () => void; onCreate
             />
           </Field>
 
-          {/* Primary coder */}
+          {/* Coder — fixed to DeepSeek */}
+          <div className="rounded-lg border border-zinc-800 p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
+                DeepSeek — code generator
+              </p>
+              <KeyBadge provider={CODER_PROVIDER} credMap={credMap} />
+            </div>
+            <p className="text-[10px] text-zinc-600">
+              Fixed to {CODER_MODEL_ID}. Used for all code generation and patch application.
+            </p>
+          </div>
+
+          {/* Reviewer 1 */}
           <div className="rounded-lg border border-zinc-800 p-3 space-y-3">
             <div className="flex items-center justify-between">
               <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
-                Primary coder — generates code
+                Reviewer 1
               </p>
-              <KeyBadge provider={form.primaryProvider} credMap={credMap} />
+              <KeyBadge provider={form.r1Provider} credMap={credMap} />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Provider">
-                <ProviderSelect value={form.primaryProvider} onChange={setPrimaryProvider} />
+                <ProviderSelect value={form.r1Provider} onChange={setR1Provider} />
               </Field>
               <Field label="Model">
                 <ModelSelect
-                  provider={form.primaryProvider}
-                  value={form.primaryModelId}
-                  onChange={(id) => setForm({ ...form, primaryModelId: id })}
+                  provider={form.r1Provider}
+                  value={form.r1ModelId}
+                  onChange={(id) => setForm({ ...form, r1ModelId: id })}
                 />
               </Field>
             </div>
           </div>
 
-          {/* Reviewer */}
+          {/* Reviewer 2 */}
           <div className="rounded-lg border border-zinc-800 p-3 space-y-3">
             <div className="flex items-center justify-between">
               <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
-                Reviewer — pseudo-code hints only, never full code
+                Reviewer 2
               </p>
-              <KeyBadge provider={form.reviewerProvider} credMap={credMap} />
+              <KeyBadge provider={form.r2Provider} credMap={credMap} />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Provider">
-                <ProviderSelect value={form.reviewerProvider} onChange={setReviewerProvider} />
+                <ProviderSelect value={form.r2Provider} onChange={setR2Provider} />
               </Field>
               <Field label="Model">
                 <ModelSelect
-                  provider={form.reviewerProvider}
-                  value={form.reviewerModelId}
-                  onChange={(id) => setForm({ ...form, reviewerModelId: id })}
+                  provider={form.r2Provider}
+                  value={form.r2ModelId}
+                  onChange={(id) => setForm({ ...form, r2ModelId: id })}
                 />
               </Field>
             </div>
+            <p className="text-[10px] text-zinc-600">Must be a different provider from Reviewer 1</p>
           </div>
 
           {error && <p className="text-xs text-red-400">{error}</p>}

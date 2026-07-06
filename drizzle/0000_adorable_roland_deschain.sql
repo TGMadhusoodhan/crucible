@@ -18,10 +18,10 @@ CREATE TABLE `projects` (
 	`id` text PRIMARY KEY NOT NULL,
 	`name` text NOT NULL,
 	`description` text DEFAULT '' NOT NULL,
-	`primary_provider` text NOT NULL,
-	`primary_model_id` text NOT NULL,
-	`reviewer_provider` text NOT NULL,
-	`reviewer_model_id` text NOT NULL,
+	`r1_provider` text NOT NULL,
+	`r1_model_id` text NOT NULL,
+	`r2_provider` text NOT NULL,
+	`r2_model_id` text NOT NULL,
 	`created_at` integer NOT NULL
 );
 --> statement-breakpoint

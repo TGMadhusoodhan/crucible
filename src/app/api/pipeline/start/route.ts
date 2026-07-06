@@ -10,15 +10,18 @@ import type { ApiResponse, Provider } from '@/types'
 const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together'] as const
 
 const startSchema = z.object({
-  projectId:        z.string().min(1),
-  taskDescription:  z.string().min(1).max(50_000),
-  primaryProvider:  z.enum(PROVIDERS),
-  primaryModelId:   z.string().min(1).max(200),
-  reviewerProvider: z.enum(PROVIDERS),
-  reviewerModelId:  z.string().min(1).max(200),
-  contextText:      z.string().max(40_000).optional(),
-  contextFiles:     z.array(z.string().max(500)).max(50).optional(),
+  projectId:       z.string().min(1),
+  taskDescription: z.string().min(1).max(50_000),
+  r1Provider:      z.enum(PROVIDERS),
+  r1ModelId:       z.string().min(1).max(200),
+  r2Provider:      z.enum(PROVIDERS),
+  r2ModelId:       z.string().min(1).max(200),
+  contextText:     z.string().max(40_000).optional(),
+  contextFiles:    z.array(z.string().max(500)).max(50).optional(),
 })
+
+const CODER_PROVIDER  = 'deepseek' as const
+const CODER_MODEL_ID  = 'deepseek-v4-pro' as const
 
 async function getApiKey(provider: Provider): Promise<string | null> {
   const [row] = await db
@@ -45,36 +48,44 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
 
     const {
       projectId, taskDescription,
-      primaryProvider, primaryModelId,
-      reviewerProvider, reviewerModelId,
+      r1Provider, r1ModelId,
+      r2Provider, r2ModelId,
       contextText, contextFiles,
     } = parsed.data
 
-    if (primaryProvider === reviewerProvider) {
+    if (r1Provider === r2Provider) {
       return NextResponse.json(
         {
           success: false,
-          error: `Primary and reviewer must use different providers for genuine cross-validation. Both are set to "${primaryProvider}".`,
+          error: `R1 and R2 must use different providers for genuine cross-validation. Both are set to "${r1Provider}".`,
         },
         { status: 422 },
       )
     }
 
-    const [primaryApiKey, reviewerApiKey] = await Promise.all([
-      getApiKey(primaryProvider),
-      getApiKey(reviewerProvider),
+    const [coderApiKey, r1ApiKey, r2ApiKey] = await Promise.all([
+      getApiKey(CODER_PROVIDER),
+      getApiKey(r1Provider),
+      getApiKey(r2Provider),
     ])
 
-    if (!primaryApiKey) {
+    if (!coderApiKey) {
       return NextResponse.json(
-        { success: false, error: `No valid API key for ${primaryProvider} (primary model). Add it in Settings.` },
+        { success: false, error: `No valid API key for ${CODER_PROVIDER} (coder model). Add it in Settings.` },
         { status: 422 },
       )
     }
 
-    if (!reviewerApiKey) {
+    if (!r1ApiKey) {
       return NextResponse.json(
-        { success: false, error: `No valid API key for ${reviewerProvider} (reviewer model). Add it in Settings.` },
+        { success: false, error: `No valid API key for ${r1Provider} (R1 model). Add it in Settings.` },
+        { status: 422 },
+      )
+    }
+
+    if (!r2ApiKey) {
+      return NextResponse.json(
+        { success: false, error: `No valid API key for ${r2Provider} (R2 model). Add it in Settings.` },
         { status: 422 },
       )
     }
@@ -84,12 +95,11 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       projectId,
       taskDescription,
       config: {
-        primaryProvider,
-        primaryModelId,
-        primaryApiKey,
-        reviewerProvider,
-        reviewerModelId,
-        reviewerApiKey,
+        coderProvider: CODER_PROVIDER,
+        coderModelId:  CODER_MODEL_ID,
+        coderApiKey,
+        r1Provider, r1ModelId, r1ApiKey,
+        r2Provider, r2ModelId, r2ApiKey,
       },
       contextInput: (contextText || contextFiles?.length)
         ? { text: contextText, files: contextFiles }

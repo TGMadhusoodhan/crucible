@@ -74,3 +74,38 @@ Append-only. Every significant decision and its reasoning.
 **Decision:** Keep `export default clerkMiddleware(...)` in proxy.ts. Clerk v7 does not export clerkProxy.
 **Reason:** Next.js 16 proxy accepts both default and named exports. clerkMiddleware default export is valid.
 **Date:** 2026-05-29
+
+## D015 — V3: Dual-Reviewer Architecture (R1 + R2, no single "reviewer")
+**Decision:** Replaced the V2 primary/reviewer pair with coder (fixed DeepSeek) + R1 + R2. R1 and R2
+independently review and patch every generated file; conflicting fixes go through cross-review, then
+a human micro-gate if still unresolved; 3 rounds per file before arbitration (round-uncapped after
+a human choice).
+**Reason:** Two independent reviewers catch more than one reviewer catches alone, and cross-review
+resolves most disagreements without human involvement — human gates are reserved for genuine
+deadlocks (micro-gate) and exhausted rounds (arbitration).
+**Date:** 2026-07-05
+
+## D016 — Patch application is a real model call, sanity-checked against a deterministic fallback
+**Decision:** `ModelAdapter.applyPatch()` asks DeepSeek to reproduce the file with hunks applied,
+but `phase3-patch.ts` checks the result's line count against what the hunks imply and falls back to
+`applyResolvedHunks()` (pure string splicing) if it looks truncated or wrong.
+**Reason:** "DeepSeek applies decided fixes" is a named pipeline step, not just an implementation
+detail — but LLMs reproducing large files verbatim risk truncation, so the deterministic function
+(exact for the non-overlapping case) is the safety net, not the primary path.
+**Date:** 2026-07-05
+
+## D017 — Gate-resolution routes never call runPipeline directly
+**Decision:** micro-gate, arbitration, and output-gate routes only mutate + persist session state.
+The client's reconnect to `/api/pipeline/stream` is what actually drives `runPipeline` forward.
+**Reason:** Every other gate-resolution flow in the app already worked this way (submitAnswers,
+confirmSpec, play). Calling `runPipeline` from the route too would race it against the client's own
+reconnect for the same session.
+**Date:** 2026-07-05
+
+## D018 — Coder is fixed to DeepSeek; only R1/R2 provider+model are stored per-project
+**Decision:** `projects` table has `r1_provider`/`r1_model_id`/`r2_provider`/`r2_model_id` only — no
+coder columns. `PipelineConfig.coderProvider`/`coderModelId` are literal-typed constants, not
+per-project configuration.
+**Reason:** V3's whole premise is DeepSeek generates, two *different* models review. Making the coder
+configurable would reopen a design question that's already been settled.
+**Date:** 2026-07-05

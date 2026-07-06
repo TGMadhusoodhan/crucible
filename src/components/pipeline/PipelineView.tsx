@@ -2,43 +2,43 @@
 
 import { usePipeline } from '@/hooks/usePipeline'
 import { usePipelineState } from '@/store'
-import { TaskInputPanel }   from './TaskInputPanel'
-import { ThinkingPanel }    from './ThinkingPanel'
-import { AlignmentPanel }   from './AlignmentPanel'
-import { QuestionsPanel }   from './QuestionsPanel'
-import { SpecPanel }        from './SpecPanel'
-import { GeneratingPanel }  from './GeneratingPanel'
-import { DialoguePanel }    from './DialoguePanel'
-import { ConflictPanel }    from './ConflictPanel'
-import { CompletePanel }    from './CompletePanel'
-import { FileGatePanel }   from './FileGatePanel'
+import { TaskInputPanel }    from './TaskInputPanel'
+import { ThinkingPanel }     from './ThinkingPanel'
+import { AlignmentPanel }    from './AlignmentPanel'
+import { QuestionsPanel }    from './QuestionsPanel'
+import { SpecPanel }         from './SpecPanel'
+import { GeneratingPanel }   from './GeneratingPanel'
+import { ReviewingPanel }    from './ReviewingPanel'
+import { CrossReviewPanel }  from './CrossReviewPanel'
+import { MicroGatePanel }    from './MicroGatePanel'
+import { PatchingPanel }     from './PatchingPanel'
+import { ArbitrationPanel }  from './ArbitrationPanel'
+import { OutputGatePanel }   from './OutputGatePanel'
+import { CompletePanel }     from './CompletePanel'
 import { cn } from '@/lib/utils'
 
 const THINKING_SIDEBAR_PHASES = new Set([
   'phase1_5_alignment',
   'phase2_questions',
   'phase2_answering',
-  'phase2_contradictions',
-  'phase2_spec',
-  'phase2_spec_confirm',
+  'phase2_contradiction_check',
+  'phase2_spec_and_manifest',
+  'phase2_confirm',
 ])
-
-const PHASE3_LABELS: Partial<Record<string, string>> = {
-  phase3_reviewer_edit: 'Reviewer editing…',
-  phase3_coder_verify:  'Coder verifying reviewer\'s changes…',
-  phase3_consensus:     'Promoting to output…',
-}
 
 // ─── Phase progress strip ─────────────────────────────────────────────────────
 
 const PHASES = [
   { label: 'Think',    phases: ['phase1_thinking'] },
   { label: 'Align',    phases: ['phase1_5_alignment'] },
-  { label: 'Q&A',      phases: ['phase2_questions', 'phase2_answering', 'phase2_contradictions'] },
-  { label: 'Spec',     phases: ['phase2_spec', 'phase2_spec_confirm'] },
-  { label: 'Generate', phases: ['phase3_generating', 'phase3_self_check', 'phase3_reviewing'] },
-  { label: 'Verify',   phases: ['phase3_reviewer_edit', 'phase3_coder_verify', 'phase3_dialogue', 'phase3_consensus', 'conflict_escalated'] },
-  { label: 'Review',   phases: ['phase3_file_gate', 'phase3_file_feedback'] },
+  { label: 'Q&A',      phases: ['phase2_questions', 'phase2_answering', 'phase2_contradiction_check'] },
+  { label: 'Spec',     phases: ['phase2_spec_and_manifest', 'phase2_confirm'] },
+  { label: 'Generate', phases: ['phase3_generating'] },
+  { label: 'Review',   phases: [
+      'phase3_reviewing', 'phase3_cross_review', 'phase3_micro_gate',
+      'phase3_patching', 'phase3_re_review', 'phase3_arbitration',
+    ] },
+  { label: 'Approve',  phases: ['output_gate'] },
   { label: 'Done',     phases: ['complete'] },
 ]
 
@@ -48,18 +48,19 @@ function ProgressStrip() {
   if (phase === 'idle' || phase === 'stopped' || phase === 'error') return null
 
   const currentIdx = PHASES.findIndex(p => p.phases.includes(phase))
+  const isGate = phase === 'phase3_micro_gate' || phase === 'phase3_arbitration'
 
   return (
     <div className="flex items-center gap-0 border-b border-zinc-800 px-6 py-2 bg-zinc-950/60">
       {PHASES.map((step, i) => {
-        const done    = i < currentIdx
-        const active  = i === currentIdx
-        const conflict = phase === 'conflict_escalated' && step.label === 'Verify'
+        const done   = i < currentIdx
+        const active = i === currentIdx
+        const gate   = isGate && step.label === 'Review'
         return (
           <div key={step.label} className="flex items-center">
             <span className={cn(
               'text-[10px] px-2 py-0.5 rounded-full transition-colors',
-              conflict && active ? 'bg-red-950/60 text-red-400' :
+              gate               ? 'bg-amber-950/60 text-amber-400' :
               done               ? 'text-green-500' :
               active             ? 'bg-indigo-950/60 text-indigo-300' :
                                    'text-zinc-700',
@@ -87,7 +88,7 @@ function ControlsBar() {
   const showPause = isStreaming && phase !== 'paused'
   const showPlay  = phase === 'paused'
   const showStop  = phase !== 'complete' && phase !== 'stopped' && phase !== 'idle'
-  const showReset = phase === 'complete' || phase === 'stopped' || phase === 'error' || phase === 'phase3_file_gate'
+  const showReset = phase === 'complete' || phase === 'stopped' || phase === 'error'
 
   if (!showPause && !showPlay && !showStop && !showReset) return null
 
@@ -156,11 +157,11 @@ function ErrorBanner() {
 // ─── Main view ────────────────────────────────────────────────────────────────
 
 export function PipelineView() {
-  const { phase, thinkingPrimary, thinkingReviewer } = usePipelineState()
+  const { phase, thinkingR1, thinkingR2 } = usePipelineState()
 
   // Show thinking panel as left sidebar when we're past the thinking phase
   // so the model analysis stays visible while the user reviews Q&A or spec.
-  const hasThinking = thinkingPrimary !== null || thinkingReviewer !== null
+  const hasThinking = thinkingR1 !== null || thinkingR2 !== null
   const showThinkingSidebar = hasThinking && THINKING_SIDEBAR_PHASES.has(phase)
 
   function renderMain() {
@@ -177,30 +178,34 @@ export function PipelineView() {
 
       case 'phase2_questions':
       case 'phase2_answering':
-      case 'phase2_contradictions':
+      case 'phase2_contradiction_check':
         return <QuestionsPanel />
 
-      case 'phase2_spec':
-      case 'phase2_spec_confirm':
+      case 'phase2_spec_and_manifest':
+      case 'phase2_confirm':
         return <SpecPanel />
 
       case 'phase3_generating':
-      case 'phase3_self_check':
+        return <GeneratingPanel />
+
       case 'phase3_reviewing':
-      case 'phase3_reviewer_edit':
-      case 'phase3_coder_verify':
-      case 'phase3_consensus':
-        return <GeneratingPanel label={PHASE3_LABELS[phase]} />
+      case 'phase3_re_review':
+        return <ReviewingPanel />
 
-      case 'phase3_dialogue':
-        return <DialoguePanel />
+      case 'phase3_cross_review':
+        return <CrossReviewPanel />
 
-      case 'phase3_file_gate':
-      case 'phase3_file_feedback':
-        return <FileGatePanel />
+      case 'phase3_micro_gate':
+        return <MicroGatePanel />
 
-      case 'conflict_escalated':
-        return <ConflictPanel />
+      case 'phase3_patching':
+        return <PatchingPanel />
+
+      case 'phase3_arbitration':
+        return <ArbitrationPanel />
+
+      case 'output_gate':
+        return <OutputGatePanel />
 
       case 'complete':
         return <CompletePanel />

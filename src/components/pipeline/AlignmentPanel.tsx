@@ -4,9 +4,9 @@ import { usePipelineState } from '@/store'
 import { cn } from '@/lib/utils'
 import type { AlignmentMessage } from '@/types'
 
-function MessageBubble({ msg, project }: { msg: AlignmentMessage; project: { primaryModelId: string; reviewerModelId: string } | null }) {
+function MessageBubble({ msg, project }: { msg: AlignmentMessage; project: { r1ModelId: string; r2ModelId: string } | null }) {
   const isPrimary  = msg.actor === 'primary'
-  const modelLabel = isPrimary ? (project?.primaryModelId ?? 'Primary') : (project?.reviewerModelId ?? 'Reviewer')
+  const modelLabel = isPrimary ? (project?.r1ModelId ?? 'R1') : (project?.r2ModelId ?? 'R2')
 
   return (
     <div className={cn('flex flex-col gap-1', isPrimary ? 'items-start' : 'items-end')}>

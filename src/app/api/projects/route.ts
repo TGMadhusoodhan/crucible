@@ -8,12 +8,15 @@ import type { ApiResponse } from '@/types'
 const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together'] as const
 
 const createSchema = z.object({
-  name:             z.string().min(1).max(100),
-  description:      z.string().max(500).default(''),
-  primaryProvider:  z.enum(PROVIDERS),
-  primaryModelId:   z.string().min(1),
-  reviewerProvider: z.enum(PROVIDERS),
-  reviewerModelId:  z.string().min(1),
+  name:        z.string().min(1).max(100),
+  description: z.string().max(500).default(''),
+  r1Provider:  z.enum(PROVIDERS),
+  r1ModelId:   z.string().min(1),
+  r2Provider:  z.enum(PROVIDERS),
+  r2ModelId:   z.string().min(1),
+}).refine(d => d.r1Provider !== d.r2Provider, {
+  message: 'Reviewers must use different providers',
+  path:    ['r2Provider'],
 })
 
 export async function GET(): Promise<NextResponse<ApiResponse>> {

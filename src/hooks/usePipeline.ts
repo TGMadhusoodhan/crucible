@@ -58,10 +58,10 @@ function connectSSE(
 const NO_AUTO_RECONNECT = new Set([
   'idle',
   'phase2_answering',
-  'phase2_spec_confirm',
-  'phase3_file_gate',
-  'phase3_file_feedback',
-  'conflict_escalated',
+  'phase2_confirm',
+  'phase3_micro_gate',
+  'phase3_arbitration',
+  'output_gate',
   'paused',
   'stopped',
   'complete',
@@ -70,8 +70,10 @@ const NO_AUTO_RECONNECT = new Set([
 
 // Phases that are internal pipeline phases (not human gates).
 // When stream closes at these, client reconnects automatically.
-// phase3_reviewing, phase3_reviewer_edit, phase3_coder_verify, phase3_dialogue
-// are all pipeline-internal phases handled within one stream session or auto-reconnected.
+// phase1_thinking, phase1_5_alignment, phase2_questions, phase2_contradiction_check,
+// phase2_spec_and_manifest, phase3_generating, phase3_reviewing, phase3_cross_review,
+// phase3_patching, phase3_re_review are all pipeline-internal phases handled within
+// one stream session or auto-reconnected.
 
 export function usePipeline() {
   const state    = usePipelineState()
@@ -93,6 +95,17 @@ export function usePipeline() {
         lastPhaseRef.current = event.phase
         dispatch({ type: 'SET_PHASE', phase: event.phase })
         break
+      case 'error':
+        dispatch({ type: 'SET_ERROR', message: event.message })
+        break
+      case 'done':
+        dispatch({ type: 'STREAM_END' })
+        break
+      case 'budget_update':
+        dispatch({ type: 'BUDGET_UPDATE', budget: event.budget })
+        break
+      case 'heartbeat':
+        break
       case 'thinking_done':
         dispatch({ type: 'THINKING_DONE', actor: event.actor, output: event.output })
         break
@@ -101,14 +114,18 @@ export function usePipeline() {
         break
       case 'questions_ready':
         dispatch({ type: 'QUESTIONS_READY', questions: event.questions })
-        dispatch({ type: 'SET_PHASE', phase: 'phase2_answering' })
         break
       case 'contradiction':
-        dispatch({ type: 'SET_CONTRADICTION', contradiction: event.contradiction })
+        dispatch({ type: 'CONTRADICTION', contradiction: event.contradiction })
         break
       case 'spec_ready':
         dispatch({ type: 'SPEC_READY', spec: event.spec })
-        dispatch({ type: 'SET_PHASE', phase: 'phase2_spec_confirm' })
+        break
+      case 'manifest_ready':
+        dispatch({ type: 'MANIFEST_READY', manifest: event.manifest })
+        break
+      case 'file_generating':
+        dispatch({ type: 'FILE_GENERATING', filename: event.filename, fileIndex: event.fileIndex, totalFiles: event.totalFiles })
         break
       case 'token':
         tokenBufferRef.current += event.text
@@ -120,59 +137,41 @@ export function usePipeline() {
           })
         }
         break
-      case 'self_check_done':
-        dispatch({ type: 'SELF_CHECK_DONE', output: event.output })
+      case 'file_generated':
+        dispatch({ type: 'FILE_GENERATED', filename: event.filename, code: event.code })
         break
-      case 'review_done':
-        dispatch({ type: 'REVIEW_DONE', review: event.review })
+      case 'review_hunks':
+        dispatch({ type: 'REVIEW_HUNKS', actor: event.actor, hunks: event.hunks })
+        break
+      case 'hunks_merged':
+        dispatch({ type: 'HUNKS_MERGED', resolved: event.resolved, conflicts: event.conflicts })
+        break
+      case 'cross_review_response':
+        dispatch({ type: 'CROSS_REVIEW_RESPONSE', actor: event.actor, response: event.response })
+        break
+      case 'conflicts_resolved':
+        dispatch({ type: 'CONFLICTS_RESOLVED', resolved: event.resolved })
+        break
+      case 'micro_gate':
+        dispatch({ type: 'MICRO_GATE', conflict: event.conflict })
+        break
+      case 'file_patched':
+        dispatch({ type: 'FILE_PATCHED', filename: event.filename, code: event.code })
+        break
+      case 're_review_hunks':
+        dispatch({ type: 'RE_REVIEW_HUNKS', actor: event.actor, hunks: event.hunks })
+        break
+      case 'file_accepted':
+        dispatch({ type: 'FILE_ACCEPTED', filename: event.filename, code: event.code })
+        break
+      case 'arbitration':
+        dispatch({ type: 'ARBITRATION', pkg: event.pkg })
+        break
+      case 'output_gate_ready':
+        dispatch({ type: 'OUTPUT_GATE_READY', files: event.files })
         break
       case 'consensus':
         dispatch({ type: 'CONSENSUS', output: event.output })
-        break
-      case 'file_ready':
-        dispatch({ type: 'FILE_READY', filename: event.filename, code: event.code, fileIndex: event.fileIndex, totalFiles: event.totalFiles })
-        break
-      case 'file_accepted':
-        dispatch({ type: 'FILE_ACCEPTED', filename: event.filename, code: event.code, fileIndex: event.fileIndex })
-        break
-      case 'files_complete':
-        dispatch({ type: 'FILES_COMPLETE', acceptedFiles: event.acceptedFiles })
-        break
-      case 'conflict': {
-        const review = event.review
-        const highMed = review.flags
-          .filter(f => f.severity !== 'LOW')
-          .map(f => `[${f.severity}] ${f.description}`)
-          .join('\n')
-        dispatch({
-          type:   'CONFLICT_ESCALATED',
-          review,
-          round:  event.round,
-          reason: highMed || review.reasoning,
-        })
-        break
-      }
-      case 'reviewer_edit_done':
-        dispatch({ type: 'REVIEWER_EDIT_DONE', edit: event.edit })
-        break
-      case 'coder_verify_done':
-        dispatch({ type: 'CODER_VERIFY_DONE', verification: event.verification })
-        break
-      case 'dialogue_msg':
-        dispatch({ type: 'DIALOGUE_MSG', message: event.message })
-        break
-      case 'dialogue_resolved':
-        dispatch({ type: 'DIALOGUE_RESOLVED', mergedCode: event.mergedCode })
-        break
-      case 'dialogue_escalated':
-        dispatch({ type: 'DIALOGUE_ESCALATED', summary: event.summary })
-        break
-      case 'error':
-        dispatch({ type: 'SET_ERROR', error: event.message })
-        dispatch({ type: 'SET_PHASE', phase: 'error' })
-        break
-      case 'done':
-        dispatch({ type: 'SET_STREAMING', value: false })
         break
     }
   }, [dispatch])
@@ -184,13 +183,13 @@ export function usePipeline() {
     const controller = new AbortController()
     abortRef.current = controller
 
-    dispatch({ type: 'SET_STREAMING', value: true })
+    dispatch({ type: 'STREAM_START' })
 
     try {
       await connectSSE(sessionId, handleSSEEvent, controller.signal)
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') return
-      dispatch({ type: 'SET_ERROR', error: err instanceof Error ? err.message : 'Stream error' })
+      dispatch({ type: 'SET_ERROR', message: err instanceof Error ? err.message : 'Stream error' })
       return
     } finally {
       if (rafRef.current) {
@@ -204,14 +203,12 @@ export function usePipeline() {
       }
       if (abortRef.current === controller) {
         abortRef.current = null
-        dispatch({ type: 'SET_STREAMING', value: false })
+        dispatch({ type: 'STREAM_END' })
       }
     }
 
     // If the stream closed at a pipeline-internal phase (not a human gate or
     // terminal state), the pipeline still has work to do — reconnect immediately.
-    // This handles the normal split (phase3_reviewing), Vercel timeout mid-self-check
-    // (phase3_self_check), and any other unexpected mid-pipeline disconnect.
     if (!NO_AUTO_RECONNECT.has(lastPhaseRef.current)) {
       if (reconnectCountRef.current < MAX_AUTO_RECONNECTS) {
         reconnectCountRef.current++
@@ -219,7 +216,7 @@ export function usePipeline() {
       } else {
         dispatch({
           type: 'SET_ERROR',
-          error: `Pipeline stalled after ${MAX_AUTO_RECONNECTS} reconnects. Refresh to retry.`,
+          message: `Pipeline stalled after ${MAX_AUTO_RECONNECTS} reconnects. Refresh to retry.`,
         })
       }
     } else {
@@ -231,22 +228,23 @@ export function usePipeline() {
   // ─── Start pipeline ────────────────────────────────────────────────────────
 
   const startPipeline = useCallback(async (
+    project:         ProjectConfig,
     taskDescription: string,
     contextText?:    string,
   ) => {
-    if (!state.project) throw new Error('No project selected')
-
     const res = await fetch('/api/pipeline/start', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        projectId:        state.project.id,
+        projectId:      project.id,
         taskDescription,
-        primaryProvider:  state.project.primaryProvider,
-        primaryModelId:   state.project.primaryModelId,
-        reviewerProvider: state.project.reviewerProvider,
-        reviewerModelId:  state.project.reviewerModelId,
-        contextText:      contextText || undefined,
+        coderProvider:  project.coderProvider,
+        coderModelId:   project.coderModelId,
+        r1Provider:     project.r1Provider,
+        r1ModelId:      project.r1ModelId,
+        r2Provider:     project.r2Provider,
+        r2ModelId:      project.r2ModelId,
+        contextText:    contextText || undefined,
       }),
     })
 
@@ -256,14 +254,14 @@ export function usePipeline() {
     }
 
     const { sessionId } = data.data
-    dispatch({ type: 'START_SESSION', sessionId })
+    dispatch({ type: 'START_SESSION', sessionId, project })
 
     // Connect to stream — runs until hitting a gate (questions, spec, etc.)
     void connectToStream(sessionId)
     return sessionId
-  }, [state.project, dispatch, connectToStream])
+  }, [dispatch, connectToStream])
 
-  // ─── Submit answers ────────────────────────────────────────────────────────
+  // ─── Submit answers (HUMAN GATE 1) ─────────────────────────────────────────
 
   const submitAnswers = useCallback(async (answers: Record<string, string>) => {
     if (!state.sessionId) return
@@ -277,11 +275,11 @@ export function usePipeline() {
     const data = await res.json() as { success: boolean; error?: string }
     if (!data.success) throw new Error(data.error ?? 'Failed to submit answers')
 
-    dispatch({ type: 'SET_PHASE', phase: 'phase2_contradictions' })
+    dispatch({ type: 'SET_PHASE', phase: 'phase2_contradiction_check' })
     void connectToStream(state.sessionId)
   }, [state.sessionId, dispatch, connectToStream])
 
-  // ─── Confirm spec ──────────────────────────────────────────────────────────
+  // ─── Confirm spec + manifest (HUMAN GATE 2) ────────────────────────────────
 
   const confirmSpec = useCallback(async () => {
     if (!state.sessionId) return
@@ -296,27 +294,61 @@ export function usePipeline() {
     if (!data.success) throw new Error(data.error ?? 'Failed to confirm spec')
 
     dispatch({ type: 'SET_PHASE', phase: 'phase3_generating' })
-    // streamingCode is reset in the reducer when phase becomes 'phase3_generating'
     void connectToStream(state.sessionId)
   }, [state.sessionId, dispatch, connectToStream])
 
-  // ─── Resolve conflict ──────────────────────────────────────────────────────
+  // ─── Micro-gate: R1/R2 disagree on a hunk (HUMAN GATE 3) ───────────────────
 
-  const resolveConflict = useCallback(async (overrideMessage: string) => {
+  const submitMicroGate = useCallback(async (conflictId: string, choice: 'R1' | 'R2') => {
     if (!state.sessionId) return
-
-    const res = await fetch('/api/pipeline/resolve', {
-      method:  'POST',
+    await fetch('/api/pipeline/micro-gate', {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId: state.sessionId, overrideMessage }),
+      body: JSON.stringify({ sessionId: state.sessionId, conflictId, choice }),
     })
-
-    const data = await res.json() as { success: boolean; error?: string }
-    if (!data.success) throw new Error(data.error ?? 'Failed to resolve conflict')
-
-    dispatch({ type: 'SET_PHASE', phase: 'phase3_generating' })
     void connectToStream(state.sessionId)
-  }, [state.sessionId, dispatch, connectToStream])
+  }, [state.sessionId, connectToStream])
+
+  // ─── Arbitration: round 3 exhausted (HUMAN GATE 4) ─────────────────────────
+
+  const submitArbitration = useCallback(async (
+    filename: string,
+    choice:   'r1' | 'r2' | 'accept' | 'regenerate',
+    guidance?: string,
+  ) => {
+    if (!state.sessionId) return
+    await fetch('/api/pipeline/arbitration', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: state.sessionId, filename, choice, guidance }),
+    })
+    // Arbitration is a mid-pipeline gate, not terminal — the pipeline continues
+    // regardless of choice, so the client must always reconnect to see what's next.
+    void connectToStream(state.sessionId)
+  }, [state.sessionId, connectToStream])
+
+  // ─── Output gate: per-file approval (HUMAN GATE 5) ─────────────────────────
+
+  const acceptOutput = useCallback(async (filename: string) => {
+    if (!state.sessionId) return
+    await fetch('/api/pipeline/output-gate/accept', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: state.sessionId, filename }),
+    })
+    // output_gate is in NO_AUTO_RECONNECT — the stream closed when the pipeline
+    // reached this gate, so the client must reconnect to see the next file (or done).
+    void connectToStream(state.sessionId)
+  }, [state.sessionId, connectToStream])
+
+  const requestOutputFix = useCallback(async (filename: string, instruction: string) => {
+    if (!state.sessionId) throw new Error('No active session')
+    return fetch('/api/pipeline/output-gate/fix', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: state.sessionId, filename, instruction }),
+    }).then(r => r.json())
+  }, [state.sessionId])
 
   // ─── Human override (mid-pipeline interrupt) ───────────────────────────────
 
@@ -366,56 +398,6 @@ export function usePipeline() {
     }).catch(() => {})
   }, [state.sessionId, dispatch])
 
-  // ─── File gate: accept current file ──────────────────────────────────────
-
-  const acceptFile = useCallback(async (filename: string, code: string) => {
-    if (!state.sessionId) return
-
-    const res = await fetch('/api/pipeline/file-accept', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId: state.sessionId, filename, code }),
-    })
-
-    const data = await res.json() as { success: boolean; data?: { fileIndex: number; done: boolean }; error?: string }
-    if (!data.success) throw new Error(data.error ?? 'Failed to accept file')
-
-    // Use server-returned fileIndex as the source of truth to avoid
-    // off-by-one if the user somehow triggers acceptFile twice.
-    dispatch({ type: 'FILE_ACCEPTED', filename, code, fileIndex: (data.data?.fileIndex ?? state.currentFileIndex + 1) - 1 })
-
-    if (data.data?.done) {
-      // All files accepted — reconnect to get files_complete event
-      dispatch({ type: 'FILES_COMPLETE', acceptedFiles: { ...state.acceptedFiles, [filename]: code } })
-    } else {
-      // More files remain — reconnect to get file_ready for next file
-      void connectToStream(state.sessionId)
-    }
-  }, [state.sessionId, state.currentFileIndex, state.acceptedFiles, dispatch, connectToStream])
-
-  // ─── File gate: send feedback for current file ────────────────────────────
-
-  const submitFileFeedback = useCallback(async (
-    filename:  string,
-    code:      string,
-    feedback:  string,
-    modelRole: 'primary' | 'reviewer' = 'primary',
-  ): Promise<{ code: string; modelId: string }> => {
-    if (!state.sessionId) throw new Error('No active session')
-
-    const res = await fetch('/api/pipeline/file-feedback', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId: state.sessionId, filename, code, feedback, modelRole }),
-    })
-
-    const data = await res.json() as { success: boolean; data?: { code: string; modelId: string }; error?: string }
-    if (!data.success || !data.data) throw new Error(data.error ?? 'Failed to get file feedback')
-
-    dispatch({ type: 'FILE_FEEDBACK', filename, code: data.data.code })
-    return data.data
-  }, [state.sessionId, dispatch])
-
   // ─── Budget refresh ────────────────────────────────────────────────────────
 
   const refreshBudget = useCallback(async () => {
@@ -424,7 +406,7 @@ export function usePipeline() {
       const res  = await fetch(url)
       if (res.ok) {
         const data = await res.json() as { success: boolean; data?: BudgetStatus }
-        if (data.success && data.data) dispatch({ type: 'SET_BUDGET', budget: data.data })
+        if (data.success && data.data) dispatch({ type: 'BUDGET_UPDATE', budget: data.data })
       }
     } catch {
       // Budget refresh is non-fatal — silently ignore network errors
@@ -435,19 +417,18 @@ export function usePipeline() {
     startPipeline,
     submitAnswers,
     confirmSpec,
-    resolveConflict,
+    submitMicroGate,
+    submitArbitration,
+    acceptOutput,
+    requestOutputFix,
     interrupt,
     pause,
     play,
     stop,
     refreshBudget,
     // answer individual questions (used by QuestionsPanel)
-    answerQuestion: (questionId: string, optionId: string) =>
-      dispatch({ type: 'ANSWER_QUESTION', questionId, optionId }),
-    setProject: (project: ProjectConfig) =>
-      dispatch({ type: 'SET_PROJECT', project }),
-    acceptFile,
-    submitFileFeedback,
+    answerQuestion: (questionId: string, answer: string) =>
+      dispatch({ type: 'SET_ANSWER', questionId, answer }),
     resetSession: () => {
       lastPhaseRef.current = 'idle'
       reconnectCountRef.current = 0

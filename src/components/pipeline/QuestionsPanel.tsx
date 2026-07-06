@@ -139,7 +139,7 @@ export function QuestionsPanel() {
     }
   }
 
-  if (phase === 'phase2_contradictions' && contradiction) {
+  if (phase === 'phase2_contradiction_check' && contradiction) {
     return (
       <div className="flex h-full flex-col items-center justify-center p-6">
         <div className="w-full max-w-xl space-y-4">

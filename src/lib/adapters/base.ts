@@ -1,20 +1,23 @@
 import { generateId } from '@/lib/utils'
+import { estimateTokens } from '@/lib/utils/tokens'
 import type {
+  AcceptanceCriterion,
   AlignmentMessage,
-  CoderVerification,
-  DialogueMessage,
-  DialogueSummary,
+  CrossReviewResponse,
+  EdgeCase,
+  FileDefinition,
+  FileManifest,
+  HunkConflict,
   ModelAdapter,
-  PipelineContext,
   PipelinePhase,
   Provider,
-  ReviewEdit,
+  Question,
+  ResolvedHunk,
   ReviewHunk,
-  ReviewPayload,
   SpecDocument,
   ThinkingOutput,
 } from '@/types'
-import { reviewPayloadSchema, selfCheckOutputSchema, thinkingOutputSchema } from '@/types'
+import { crossReviewResponseSchema, fileManifestSchema, reviewHunksSchema, thinkingOutputSchema } from '@/types'
 
 // ─── Pricing table (per million tokens) ──────────────────────────────────────
 
@@ -147,191 +150,116 @@ Rules:
 - Keep position under 200 words
 - Output raw JSON only. No markdown fences.`
 
-export const GENERATION_SYSTEM_PROMPT = `You are an expert software engineer — the primary code generator in a multi-model pipeline.
-You have received a confirmed specification. Your job: implement it completely.
-
-═══ OUTPUT FORMAT — MANDATORY ═══════════════════════════════════════════════════
-
-SINGLE-FILE TASK: return the file content only. No preamble, no explanation, no markdown fences.
-
-MULTI-FILE TASK: use ONLY these exact delimiters for every file:
-
-=== FILE: relative/path/to/file.ext ===
-(complete file content — every line)
-=== /FILE ===
-
-Rules that are NEVER negotiable:
-× No prose before, between, or after the files
-× No markdown fences of any kind — not around individual files, not around the whole output
-× Do NOT wrap the entire output in a single \`\`\` block — that causes only one file to be parsed
-× No "Here is the code", "Step 1:", "First I'll implement..."
-× No "TODO", no placeholders, no "..." — every file must be complete
-× Every file appears EXACTLY ONCE — never repeat or re-emit a file
-× No explanation of what you wrote — the code explains itself
-
-═══ IMPLEMENTATION RULES ═════════════════════════════════════════════════════════
-
-NORMAL MODE (default):
-- Write clean, correct, production-ready code
-- Return the FULL implementation for every file
-- Handle every edge case and error scenario in the spec
-- Use the language and framework implied by the task
-- Add a comment only when the WHY is genuinely non-obvious
-
-PATCH MODE (activated when prompt begins with "PATCH MODE:"):
-- A reviewer found specific bugs. Do NOT regenerate from scratch.
-- Make ONLY the minimal targeted edits to fix the listed issues
-- Touch nothing else — not variable names, not comments, not structure
-- For multi-file output, preserve all === FILE: === delimiters and all other files byte-for-byte`
-
-export const SELF_CHECK_SYSTEM_PROMPT = `You are a software engineer reviewing your own code.
-Your job: find bugs in the code you just wrote, using the spec as the source of truth.
-
-Return ONLY this exact JSON — no prose outside the JSON:
-{
-  "pass": 1,
-  "issues": [
-    {
-      "severity": "high|medium|low",
-      "description": "what is wrong",
-      "location": "optional — function name or line reference",
-      "suggested_fix": "plain English only — max 3 lines — NO code syntax"
-    }
-  ],
-  "all_clear": false,
-  "reasoning": "one paragraph summary"
-}
-
-Rules:
-- suggested_fix must be PLAIN ENGLISH — never write actual code syntax
-- GOOD: "check that the array is non-empty before accessing index 0"
-- BAD:  "if (!arr.length) return []"   ← that is code, forbidden
-- Set all_clear: true only if you found zero issues
-- Output raw JSON only. No markdown fences.`
-
-export const REVIEWER_SYSTEM_PROMPT = `You are a code reviewer inside a multi-model coding pipeline.
-The primary model wrote the code. Your job: find bugs and return a structured JSON report.
-You must NEVER write full code. Only plain-English pseudo-code hints of max 3 lines each.
-
-Return ONLY this exact JSON — no prose outside the JSON:
-{
-  "consensus": false,
-  "round": 1,
-  "flags": [
-    {
-      "id": "f1",
-      "severity": "HIGH|MEDIUM|LOW",
-      "category": "bug|logic|security|performance|edge_case",
-      "description": "what is wrong",
-      "pseudo_code_hint": "plain English fix hint — max 3 lines — NO code syntax",
-      "location": "optional — function name or line reference"
-    }
-  ],
-  "critical_bugs": ["HIGH severity bug descriptions only"],
-  "logic_errors": ["MEDIUM logic issue descriptions only"],
-  "edge_cases_missed": ["edge case descriptions only"],
-  "pseudo_code_hints": ["all hints in one flat list"],
-  "reasoning": "one paragraph summary",
-  "dependencies_rechecked": false
-}
-
-Flag routing rules:
-- HIGH/MEDIUM severity → include pseudo_code_hint (sent back to primary for patching)
-- LOW severity → include description only (goes to review_list, not primary)
-- consensus: true ONLY when you find zero HIGH or MEDIUM issues
-- In rounds 2+, set dependencies_rechecked: true after verifying no new issues introduced
-
-PSEUDO-CODE HINT RULES:
-- GOOD: "check that userId is non-null before the DB call"
-- GOOD: "loop must handle empty array — check length before accessing index 0"
-- BAD:  "if (!userId) return null"    ← code syntax, forbidden
-- BAD:  "function fix() { ... }"      ← code syntax, forbidden
-
-Output raw JSON only. No markdown fences. No explanation before or after.`
-
-export const REVIEWER_EDIT_SYSTEM_PROMPT = `You are a code reviewer inside a multi-model coding pipeline.
-You previously reviewed code and flagged specific bugs. Your job now: produce surgical code edits ONLY at the exact locations you flagged.
-
-Use this EXACT format — one block per hunk, no JSON, no markdown:
-
-=== HUNK ===
-LOCATION: function name or line reference
-REASON: one sentence — what bug this edit fixes
---- ORIGINAL ---
-(the exact code snippet as it appears in the file — copied verbatim)
---- REPLACEMENT ---
-(your corrected version of that exact snippet)
-=== END HUNK ===
-
-=== REASONING ===
-One paragraph summarizing all the edits and which flag IDs they resolve.
-=== END REASONING ===
-
-CRITICAL RULES:
-× NEVER touch code not directly related to the flagged issues
-× ORIGINAL must be copied verbatim from the provided code — not paraphrased
-× Only produce hunks for HIGH or MEDIUM severity issues — skip LOW issues
-× If an issue requires architectural change (not a targeted edit), omit its hunk and explain in REASONING
-× No prose outside the delimiters above`
-
-export const CODER_VERIFY_SYSTEM_PROMPT = `You are the primary code generator in a multi-model pipeline.
-A reviewer has made edits to your code. Your job: evaluate each edit honestly.
-
-Return ONLY this exact JSON — no prose outside the JSON:
-{
-  "agrees": true,
-  "accepted_hunks": ["location1", "location2"],
-  "rejected_hunks": [],
-  "concerns": [],
-  "first_question": null
-}
-
-OR when you disagree:
-{
-  "agrees": false,
-  "accepted_hunks": ["location1"],
-  "rejected_hunks": ["location2"],
-  "concerns": ["The replacement at location2 introduces a null dereference when input is empty"],
-  "first_question": "Why did you replace the null check at location2 — doesn't that break the empty-input case?"
-}
+export const PROPOSE_SPEC_MANIFEST_SYSTEM_PROMPT = `You are a senior
+engineer reviewing a software task. Produce two things:
+1. A complete specification
+2. A file structure plan
 
 RULES:
-- agrees: true ONLY when you accept ALL hunks and believe the merged code is correct
-- For rejected_hunks: state exactly what is wrong with the reviewer's change in "concerns"
-- first_question: a single direct question to start the dialogue (required when agrees=false)
-- Be specific — "this change is wrong" is not useful; name the exact failure mode
-- Output raw JSON only. No markdown fences.`
+- Output ONLY valid JSON — no preamble, no markdown fences
+- Spec: be precise and complete
+- Manifest: define every file needed. No implementations — names, exports,
+  and imports only. generation_order must list files dependency-first.
 
-export const CODER_DIALOGUE_SYSTEM_PROMPT = `You are the primary code generator in a resolution dialogue with a reviewer.
-The reviewer has responded to your previous concern. Read their response and either:
-  a) Agree and end the dialogue — respond with a short message ending in "RESOLVED"
-  b) Raise your next concern as a direct question
-
-Keep your response under 100 words. Be direct and specific. No code — plain English only.`
-
-export const REVIEWER_DIALOGUE_SYSTEM_PROMPT = `You are a code reviewer in a resolution dialogue with the primary code generator.
-The coder has raised a concern about one of your edits. Respond to it directly.
-
-Return ONLY this exact JSON:
+JSON schema:
 {
-  "response": "your response to the coder's concern — plain English, under 100 words",
-  "resolved": false
+  "spec": {
+    "task_description": "string",
+    "tech_stack": ["string"],
+    "requirements": ["string"],
+    "constraints": ["string"],
+    "edge_cases": ["string"],
+    "out_of_scope": ["string"],
+    "acceptance_criteria": ["string"]
+  },
+  "manifest": {
+    "mode": "single" | "multi",
+    "files": [{
+      "filename": "relative/path.ts",
+      "purpose": "one sentence",
+      "exports": ["Symbol"],
+      "imports": { "other/file.ts": ["Symbol"] }
+    }],
+    "generation_order": ["dependency.ts", "entry.ts"],
+    "reasoning": "one paragraph"
+  }
+}`
+
+export const GENERATION_SYSTEM_PROMPT = `You are an expert software
+engineer — the code generator in a multi-model pipeline.
+
+RULES:
+- Generate ONLY the single file requested
+- Raw source code only — no markdown fences, no preamble, no explanations
+- Exports must exactly match the manifest contract
+- Use correct relative import paths from the manifest
+- Production quality: error handling, edge cases, type safety`
+
+export const REVIEW_AND_PATCH_SYSTEM_PROMPT = `You are a code reviewer.
+For every issue you find, you MUST provide a complete fix.
+Never output a flag without its replacement code.
+
+OUTPUT: JSON array of ReviewHunk objects. Empty array [] if code is clean.
+No preamble. No markdown fences.
+
+[{
+  "id": "unique_id",
+  "filename": "src/file.ts",
+  "line_start": 10,
+  "line_end": 20,
+  "severity": "HIGH" | "MEDIUM" | "LOW",
+  "issue": "what is wrong — one sentence",
+  "fixed_code": "complete replacement code for those exact lines",
+  "category": "logic|security|performance|correctness|missing_implementation|edge_case|contract_violation"
+}]
+
+SEVERITY:
+- HIGH:   Incorrect behavior, security hole, missing required implementation
+- MEDIUM: Suboptimal but working, missing error handling
+- LOW:    Style, naming, minor improvement
+
+fixed_code rules:
+- Must be a drop-in replacement for EXACTLY lines line_start to line_end
+- No surrounding context lines — only the replacement
+- Maintain the same indentation level as the original
+- Must not break imports or exports defined in the manifest`
+
+export const CROSS_REVIEW_SYSTEM_PROMPT = `You are evaluating a
+competing fix from another reviewer for the same code location.
+Be honest. If their fix is better, accept it.
+
+Output ONLY valid JSON — no preamble, no fences.
+
+{
+  "conflict_id": "the conflict id provided",
+  "decision": "ACCEPT_THEIRS" | "KEEP_MINE" | "NEW_FIX",
+  "new_code": "...",
+  "reason": "one sentence explanation"
 }
 
-Set resolved: true ONLY if the coder's last message signals they are satisfied (contains "RESOLVED").
-Output raw JSON only. No markdown fences.`
+ACCEPT_THEIRS: their fix correctly solves the issue and is as good or better
+KEEP_MINE: your fix is more correct or handles more cases
+NEW_FIX: both fixes are insufficient — provide a better implementation in new_code`
+
+export const APPLY_PATCH_SYSTEM_PROMPT = `You are applying pre-decided code patches to a file.
+The patches have already been reviewed and approved by both reviewers — your job is purely mechanical.
+
+RULES:
+- Apply each patch at exactly the specified line range — do not judge, improve, or second-guess them
+- Do NOT touch any line outside the specified patch ranges
+- Output ONLY the complete updated file — raw source code, no markdown fences, no explanation`
+
+export const FIX_FILE_SYSTEM_PROMPT = `You are applying a human-requested
+fix to a file that has already passed dual-model review and been finalized.
+
+RULES:
+- Make ONLY the change the instruction asks for — do not refactor, rename,
+  reformat, or "improve" anything else in the file
+- Output ONLY the complete updated file — raw source code, no markdown
+  fences, no explanation`
 
 // ─── JSON parsers ─────────────────────────────────────────────────────────────
 
-/**
- * Escape literal control characters (newline, carriage return, tab, and all
- * other U+0000–U+001F) that appear inside JSON string values.
- *
- * Models frequently embed multi-line code in "original"/"replacement" hunk
- * fields using actual newline bytes rather than the \\n JSON escape sequence.
- * JSON.parse rejects literal control characters inside strings per RFC 7159,
- * so we fix them before parsing.
- */
 /**
  * Fix two classes of malformed JSON produced by models embedding code in strings:
  *
@@ -416,26 +344,28 @@ function sanitizeJsonString(text: string): string {
 }
 
 /**
- * Scan `text` for valid JSON objects using a stack-based brace matcher.
- * Returns them in order of appearance (outermost first per starting `{`).
- * This handles prose-wrapped JSON like "Here's my analysis: {...}" where the
- * greedy regex /\{[\s\S]*\}/ would incorrectly capture from the first "{" in
- * the prose to the last "}" in the JSON.
+ * Scan `text` for valid JSON values (objects OR arrays) using a stack-based
+ * bracket matcher. Returns them in order of appearance. This handles
+ * prose-wrapped JSON like "Here's my analysis: {...}" where a greedy regex
+ * would incorrectly capture from the first bracket in the prose to the last
+ * bracket in the JSON.
  */
-function extractJsonObjects(text: string): string[] {
+function extractJsonValues(text: string): string[] {
   const results: string[] = []
   let i = 0
   while (i < text.length) {
-    if (text[i] !== '{') { i++; continue }
+    const opener = text[i]
+    if (opener !== '{' && opener !== '[') { i++; continue }
+    const closer = opener === '{' ? '}' : ']'
     let depth = 0, inString = false, escape = false, j = i
     while (j < text.length) {
       const ch = text[j]
-      if (escape)            { escape = false; j++; continue }
+      if (escape)             { escape = false; j++; continue }
       if (ch === '\\' && inString) { escape = true;  j++; continue }
-      if (ch === '"')        { inString = !inString; j++; continue }
+      if (ch === '"')         { inString = !inString; j++; continue }
       if (!inString) {
-        if      (ch === '{') depth++
-        else if (ch === '}') { depth--; if (depth === 0) { results.push(text.slice(i, j + 1)); break } }
+        if      (ch === opener) depth++
+        else if (ch === closer) { depth--; if (depth === 0) { results.push(text.slice(i, j + 1)); break } }
       }
       j++
     }
@@ -456,15 +386,15 @@ export function parseJSON<T>(text: string, phase: string): T | null {
   const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*)```/)
   if (fenceMatch?.[1]) candidates.push(fenceMatch[1].trim())
 
-  // 2. All syntactically valid JSON objects found via stack-based extraction
-  for (const obj of extractJsonObjects(cleaned)) candidates.push(obj)
+  // 2. All syntactically valid JSON objects/arrays found via stack-based extraction
+  for (const v of extractJsonValues(cleaned)) candidates.push(v)
 
   // 3. Full cleaned text as last-ditch attempt
   candidates.push(cleaned)
 
   for (const c of candidates) {
     const t = c.trim()
-    if (!t.startsWith('{')) continue
+    if (!t.startsWith('{') && !t.startsWith('[')) continue
     // First attempt: raw parse
     try { return JSON.parse(t) as T } catch { /* fall through to sanitized attempt */ }
     // Second attempt: sanitize invalid escape sequences and literal control chars —
@@ -509,142 +439,83 @@ export function parseThinkingOutput(text: string, provider: Provider, modelId: s
   return { ...result.data, provider, model_id: modelId, tokens_used: tokensUsed }
 }
 
-export function parseSelfCheckOutput(text: string, pass: 1 | 2) {
-  const raw = parseJSON<Record<string, unknown>>(text, 'selfCheck')
-  if (!raw) return {
-    pass,
-    issues: [{ severity: 'high' as const, description: 'Self-check returned unparseable output', suggested_fix: 'Retry the self-check' }],
-    all_clear: false,
-    reasoning: 'Model did not return valid JSON',
-  }
-  const result = selfCheckOutputSchema.safeParse({ ...raw, pass })
-  if (!result.success) return {
-    pass,
-    issues: [],
-    all_clear: false,
-    reasoning: `Schema validation failed: ${result.error.issues[0]?.message}`,
-  }
-  return result.data
+export function parseReviewHunks(text: string, round: number): ReviewHunk[] {
+  const raw = parseJSON<unknown[]>(text, 'reviewAndPatch')
+  if (!Array.isArray(raw)) return []
+  return reviewHunksSchema.parse(raw).map((h, i) => ({
+    ...h,
+    id: h.id || `h_${round}_${String(i + 1).padStart(3, '0')}`,
+  }))
 }
 
-export function parseReviewPayload(text: string, round: number): ReviewPayload {
-  const raw = parseJSON<Record<string, unknown>>(text, 'review')
-
-  const looksLikeTruncation = text.length > 0 && !text.trimEnd().endsWith('}')
-
-  if (!raw) {
-    return {
-      consensus: false,
-      round,
-      flags: [],
-      critical_bugs: [looksLikeTruncation
-        ? 'Reviewer output was truncated — try again'
-        : 'Reviewer returned malformed JSON — check model ID and API key'],
-      logic_errors: [],
-      edge_cases_missed: [],
-      pseudo_code_hints: [],
-      reasoning: `${looksLikeTruncation ? 'Output truncated' : 'Parse failed'}: ${text.slice(0, 800)}`,
-      dependencies_rechecked: false,
-    }
-  }
-
-  const result = reviewPayloadSchema.safeParse({ ...raw, round })
-  if (!result.success) {
-    // Best-effort fallback from partial data
-    return {
-      consensus: Boolean(raw.consensus),
-      round,
-      flags: [],
-      critical_bugs: (raw.critical_bugs as string[] | undefined) ?? [],
-      logic_errors: (raw.logic_errors as string[] | undefined) ?? [],
-      edge_cases_missed: (raw.edge_cases_missed as string[] | undefined) ?? [],
-      pseudo_code_hints: (raw.pseudo_code_hints as string[] | undefined) ?? [],
-      reasoning: String(raw.reasoning ?? ''),
-      dependencies_rechecked: Boolean(raw.dependencies_rechecked),
-    }
-  }
-
-  // Sanitize pseudo-code hints: strip any that contain code syntax
-  const cleanHints = result.data.pseudo_code_hints.map((h) =>
-    h.replace(/[{};]|function\s+\w+\s*\(|=>\s*{|\bif\s*\(|\bfor\s*\(|\bwhile\s*\(/g, '').trim()
-  )
-  return { ...result.data, pseudo_code_hints: cleanHints }
+export function parseCrossReviewResponse(
+  text: string, conflictId: string
+): CrossReviewResponse {
+  const raw = parseJSON<Record<string, unknown>>(text, 'crossReview')
+  const result = crossReviewResponseSchema.safeParse(raw ?? {})
+  return result.success
+    ? { ...result.data, conflict_id: result.data.conflict_id || conflictId }
+    : { conflict_id: conflictId, decision: 'KEEP_MINE', reason: 'parse failed' }
 }
 
-export function parseReviewEdit(text: string): ReviewEdit {
-  // Primary path: delimiter-based format (=== HUNK === ... === END HUNK ===)
-  // This avoids all JSON escaping issues with embedded code (quotes, backslashes, newlines).
-  const hunkPattern = /=== HUNK ===\s*\nLOCATION:\s*(.+?)\nREASON:\s*(.+?)\n--- ORIGINAL ---\n([\s\S]*?)--- REPLACEMENT ---\n([\s\S]*?)=== END HUNK ===/g
-  const hunks: ReviewHunk[] = []
-  let match: RegExpExecArray | null
+// The model is prompted for a flat spec shape (task_description, tech_stack,
+// requirements, constraints, edge_cases: string[], out_of_scope,
+// acceptance_criteria: string[]) that does NOT match the real SpecDocument
+// type used across the rest of the app. This maps the model's flat output
+// into the real shape rather than trusting an unchecked cast.
+function buildSpecDocument(
+  rawSpec:         Record<string, unknown>,
+  taskDescription: string,
+  answers:         Record<string, string>,
+): SpecDocument {
+  const toCriteria = (items: unknown): AcceptanceCriterion[] =>
+    Array.isArray(items)
+      ? items.map((description, i) => ({ id: `ac_${i + 1}`, description: String(description), test_case: '' }))
+      : []
 
-  while ((match = hunkPattern.exec(text)) !== null) {
-    const [, location, reason, original, replacement] = match
-    if (location && original !== undefined && replacement !== undefined) {
-      hunks.push({
-        location:    location.trim(),
-        reason:      (reason ?? '').trim(),
-        original:    original,      // preserve exact whitespace — applyHunks needs it
-        replacement: replacement,
-      })
-    }
+  const toEdgeCases = (items: unknown): EdgeCase[] =>
+    Array.isArray(items)
+      ? items.map((scenario, i) => ({ id: `ec_${i + 1}`, scenario: String(scenario), expected_behavior: '', test_case: '' }))
+      : []
+
+  // JSON-encoded rather than joined with a plain separator — a model-provided
+  // string containing the separator itself (e.g. a requirement like "supports
+  // both React; Vue") would otherwise silently split into two entries when
+  // phase2-spec.ts's merge logic decodes this back into an array.
+  const flatDefault = (items: unknown): string | null =>
+    Array.isArray(items) && items.length > 0 ? JSON.stringify(items.map(String)) : null
+
+  const model_defaults: Record<string, string> = {}
+  for (const key of ['tech_stack', 'requirements', 'constraints', 'out_of_scope'] as const) {
+    const joined = flatDefault(rawSpec[key])
+    if (joined) model_defaults[key] = joined
   }
 
-  const reasoningMatch = text.match(/=== REASONING ===\s*\n([\s\S]*?)=== END REASONING ===/)
-  const reasoning = reasoningMatch?.[1]?.trim() ?? ''
-
-  if (hunks.length > 0 || reasoning) {
-    return { hunks, reasoning, resolves: [] }
-  }
-
-  // Fallback: try JSON for models that ignore the format instruction
-  const raw = parseJSON<Record<string, unknown>>(text, 'reviewerEdit')
-  if (!raw) return { hunks: [], reasoning: 'Reviewer returned unparseable output — skipping edits', resolves: [] }
-
-  const jsonHunks: ReviewHunk[] = []
-  if (Array.isArray(raw.hunks)) {
-    for (const h of raw.hunks as Array<Record<string, unknown>>) {
-      if (typeof h.location === 'string' && typeof h.original === 'string' && typeof h.replacement === 'string') {
-        jsonHunks.push({
-          location:    h.location,
-          original:    h.original,
-          replacement: h.replacement,
-          reason:      typeof h.reason === 'string' ? h.reason : '',
-        })
-      }
-    }
-  }
   return {
-    hunks:     jsonHunks,
-    reasoning: typeof raw.reasoning === 'string' ? raw.reasoning : '',
-    resolves:  Array.isArray(raw.resolves) ? raw.resolves.map(String) : [],
+    id:                  generateId(),
+    project_id:          '',
+    session_id:          '',
+    created_at:          new Date().toISOString(),
+    task_description:    typeof rawSpec.task_description === 'string' ? rawSpec.task_description : taskDescription,
+    user_decisions:      answers,
+    model_defaults,
+    acceptance_criteria: toCriteria(rawSpec.acceptance_criteria),
+    edge_cases:          toEdgeCases(rawSpec.edge_cases),
+    error_messages:      [],
+    human_confirmed:     false,
   }
 }
 
-export function parseCoderVerification(text: string): CoderVerification {
-  const raw = parseJSON<Record<string, unknown>>(text, 'coderVerify')
-  if (!raw) return {
-    agrees:         false,
-    accepted_hunks: [],
-    rejected_hunks: [],
-    concerns:       ['Coder returned malformed JSON — treating as disagreement'],
-    first_question: 'Could you clarify your intent for all the changes?',
-  }
+export function parseSpecAndManifest(
+  text:            string,
+  taskDescription: string,
+  answers:         Record<string, string>,
+): { spec: SpecDocument; manifest: FileManifest } | null {
+  const raw = parseJSON<Record<string, unknown>>(text, 'proposeSpecAndManifest')
+  if (!raw?.spec || !raw?.manifest) return null
   return {
-    agrees:         Boolean(raw.agrees),
-    accepted_hunks: Array.isArray(raw.accepted_hunks) ? raw.accepted_hunks.map(String) : [],
-    rejected_hunks: Array.isArray(raw.rejected_hunks) ? raw.rejected_hunks.map(String) : [],
-    concerns:       Array.isArray(raw.concerns) ? raw.concerns.map(String) : [],
-    first_question: typeof raw.first_question === 'string' ? raw.first_question : undefined,
-  }
-}
-
-export function parseReviewerDialogueResponse(text: string): { response: string; resolved: boolean } {
-  const raw = parseJSON<Record<string, unknown>>(text, 'reviewerDialogue')
-  if (!raw) return { response: text.slice(0, 500), resolved: false }
-  return {
-    response: typeof raw.response === 'string' ? raw.response : text.slice(0, 500),
-    resolved: Boolean(raw.resolved),
+    spec:     buildSpecDocument(raw.spec as Record<string, unknown>, taskDescription, answers),
+    manifest: fileManifestSchema.parse(raw.manifest),
   }
 }
 
@@ -695,7 +566,7 @@ export function buildAlignmentPrompt(
   taskDescription: string,
   myThinking: ThinkingOutput,
   otherThinking: ThinkingOutput,
-  previousMessages?: import('@/types').AlignmentMessage[],
+  previousMessages?: AlignmentMessage[],
   contextText?: string,
 ): string {
   const parts: string[] = []
@@ -743,260 +614,6 @@ export function buildAlignmentPrompt(
   return parts.join('\n')
 }
 
-export function buildGenerationPrompt(ctx: PipelineContext, patchInstructions?: { code: string; review: ReviewPayload }): string {
-  if (patchInstructions) {
-    // Issues listed BEFORE the code so the model forms targeted-edit intent
-    // before it reads a single line of the original — prevents the "plan a rewrite"
-    // failure mode that occurs when code appears first.
-    const flagsWithHints = patchInstructions.review.flags
-      .filter(f => f.severity !== 'LOW')
-      .map((f, i) => {
-        const loc  = f.location ? ` (${f.location})` : ''
-        const hint = f.pseudo_code_hint ? `\n   How to fix: ${f.pseudo_code_hint}` : ''
-        return `${i + 1}. [${f.severity}]${loc} ${f.description}${hint}`
-      })
-      .join('\n')
-
-    const issueList = flagsWithHints ||
-      patchInstructions.review.pseudo_code_hints
-        .map((h, i) => `${i + 1}. ${h}`)
-        .join('\n')
-
-    return [
-      'PATCH MODE — targeted fixes only.',
-      '',
-      'ISSUES TO FIX (make the minimum possible edit to each):',
-      issueList,
-      '',
-      'STRICT RULES:',
-      '× Do NOT rename variables, functions, or parameters',
-      '× Do NOT reorder, reorganize, or restructure code',
-      '× Do NOT add, remove, or reword comments',
-      '× Do NOT change any line not directly fixing an issue above',
-      '',
-      'ORIGINAL CODE (edit in-place — only at the exact locations of the issues above):',
-      '```',
-      patchInstructions.code,
-      '```',
-      '',
-      'Return the complete file. Every line not directly involved in a fix must be byte-for-byte identical.',
-    ].join('\n')
-  }
-
-  const specSummary = [
-    `TASK: ${ctx.taskDescription}`,
-    '',
-    'ACCEPTANCE CRITERIA:',
-    ...ctx.spec.acceptance_criteria.map((c, i) => `${i + 1}. ${c.description}`),
-    '',
-    'EDGE CASES TO HANDLE:',
-    ...ctx.spec.edge_cases.map((e, i) => `${i + 1}. ${e.scenario} → ${e.expected_behavior}`),
-    '',
-    'ERROR MESSAGES:',
-    ...ctx.spec.error_messages.map((e, i) => `${i + 1}. ${e.trigger} → "${e.message}"`),
-  ]
-
-  if (ctx.contextText) {
-    specSummary.unshift('CODEBASE CONTEXT:', '```', ctx.contextText, '```', '')
-  }
-
-  const historySection = ctx.history.length > 0
-    ? [
-        '',
-        'CONVERSATION HISTORY (most recent first):',
-        ...ctx.history.slice(-20).reverse().map(m => `[${m.role.toUpperCase()}]: ${m.content.slice(0, 300)}`),
-      ]
-    : []
-
-  const formatReminder = [
-    '',
-    'OUTPUT FORMAT REMINDER:',
-    '- Generate ALL files required by this task in a single response — do not stop early.',
-    '- Multi-file task → use === FILE: path === ... === /FILE === for every file. Each file exactly once.',
-    '- No prose, no markdown fences, no explanations. Code only.',
-    '- Do not stop after the first file or first few files. Every file must be complete before you stop.',
-  ]
-
-  return [...specSummary, ...historySection, ...formatReminder].join('\n')
-}
-
-export function buildSelfCheckPrompt(
-  code: string,
-  spec: SpecDocument,
-  pass: 1 | 2,
-  previousIssues?: import('@/types').SelfCheckIssue[],
-): string {
-  const parts: string[] = [`SELF-CHECK PASS ${pass}/2`, '']
-
-  if (pass === 2 && previousIssues && previousIssues.length > 0) {
-    parts.push(
-      'PASS 1 ISSUES (already patched — verify each fix worked and check for regressions):',
-      ...previousIssues.map((issue, i) =>
-        `  ${i + 1}. [${issue.severity.toUpperCase()}]${issue.location ? ` (${issue.location})` : ''} ${issue.description}\n     Fix applied: ${issue.suggested_fix}`
-      ),
-      '',
-      'Your tasks for pass 2:',
-      '  1. Confirm each pass-1 issue is now resolved',
-      '  2. Find any regression introduced by the pass-1 patch',
-      '  3. Find any remaining spec violations not addressed in pass 1',
-      '',
-    )
-  }
-
-  parts.push(
-    'CODE TO CHECK:',
-    '```',
-    code,
-    '```',
-    '',
-    'SPEC REQUIREMENTS:',
-    ...spec.acceptance_criteria.map((c, i) => `${i + 1}. ${c.description}`),
-    '',
-    'EDGE CASES THAT MUST BE HANDLED:',
-    ...spec.edge_cases.map((e, i) => `${i + 1}. ${e.scenario} → ${e.expected_behavior}`),
-    '',
-    pass === 2
-      ? 'Verify the pass-1 fixes, find regressions, and report any remaining issues. Your JSON response:'
-      : 'Find every bug, missing case, or spec violation. Be thorough. Your JSON response:',
-  )
-
-  return parts.join('\n')
-}
-
-export function buildReviewPrompt(
-  code: string,
-  spec: SpecDocument,
-  round: number,
-  previousReview?: ReviewPayload,
-): string {
-  const parts: string[] = [
-    `REVIEW ROUND ${round}`,
-    '',
-    'ORIGINAL TASK:',
-    spec.task_description,
-    '',
-    'ACCEPTANCE CRITERIA:',
-    ...spec.acceptance_criteria.map((c, i) => `${i + 1}. ${c.description}`),
-    '',
-  ]
-
-  if (round > 1 && previousReview) {
-    const prevHighMed = previousReview.flags.filter(f => f.severity !== 'LOW')
-    if (prevHighMed.length > 0) {
-      parts.push(
-        'PREVIOUSLY FLAGGED ISSUES (check if resolved):',
-        ...prevHighMed.map(f => `• [${f.severity}] ${f.description}`),
-        '',
-        'Set dependencies_rechecked: true in your response after verifying these.',
-        '',
-      )
-    }
-  }
-
-  parts.push('CODE TO REVIEW:', '```', code, '```')
-
-  return parts.join('\n')
-}
-
-export function buildReviewerEditPrompt(
-  code: string,
-  spec: SpecDocument,
-  review: ReviewPayload,
-): string {
-  const highMedFlags = review.flags.filter(f => f.severity !== 'LOW')
-  const flagList = highMedFlags.map((f, i) => {
-    const loc = f.location ? ` (${f.location})` : ''
-    return `${i + 1}. [${f.severity}]${loc} ${f.description}`
-  }).join('\n')
-
-  return [
-    'TASK:',
-    spec.task_description,
-    '',
-    'YOUR REVIEW FLAGS (these are the issues to fix):',
-    flagList || '(no HIGH/MEDIUM flags — return empty hunks)',
-    '',
-    'CODE TO EDIT:',
-    '```',
-    code,
-    '```',
-    '',
-    'Produce surgical code hunks for ONLY the flagged issues above.',
-    'Copy the ORIGINAL section verbatim from the code — it must match character-for-character.',
-    'Use the === HUNK === ... === END HUNK === format from your instructions. No JSON, no markdown.',
-  ].join('\n')
-}
-
-export function buildCoderVerifyPrompt(
-  originalCode: string,
-  edit: ReviewEdit,
-  mergedCode: string,
-  review: ReviewPayload,
-): string {
-  const hunkList = edit.hunks.map((h, i) =>
-    `${i + 1}. [${h.location}]\n   Reason: ${h.reason}\n   Original:\n   ${h.original.slice(0, 200)}\n   Replacement:\n   ${h.replacement.slice(0, 200)}`
-  ).join('\n\n')
-
-  return [
-    `REVIEWER'S EDITS (round ${review.round}):`,
-    edit.reasoning,
-    '',
-    'INDIVIDUAL HUNKS:',
-    hunkList || '(no hunks — reviewer found no fix)',
-    '',
-    'MERGED CODE (original + reviewer edits applied):',
-    '```',
-    mergedCode.slice(0, 8000),
-    '```',
-    '',
-    'Evaluate each hunk. Do the reviewer\'s changes correctly fix the issues without introducing new bugs?',
-    'Return raw JSON only.',
-  ].join('\n')
-}
-
-export function buildCoderDialoguePrompt(
-  code: string,
-  dialogue: DialogueSummary,
-  verification: CoderVerification,
-): string {
-  const history = dialogue.messages.map(m =>
-    `[${m.actor.toUpperCase()} — Round ${m.round}]: ${m.content}`
-  ).join('\n\n')
-
-  return [
-    'DIALOGUE HISTORY:',
-    history || '(start of dialogue)',
-    '',
-    'YOUR CONCERNS SO FAR:',
-    (verification.concerns.join('\n') || verification.first_question) ?? '',
-    '',
-    'Respond to the reviewer\'s last message. If satisfied, end with "RESOLVED".',
-    'Plain English only — no code. Under 100 words.',
-  ].join('\n')
-}
-
-export function buildReviewerDialoguePrompt(
-  code: string,
-  dialogue: DialogueSummary,
-  review: ReviewPayload,
-): string {
-  const history = dialogue.messages.map(m =>
-    `[${m.actor.toUpperCase()} — Round ${m.round}]: ${m.content}`
-  ).join('\n\n')
-
-  return [
-    'ORIGINAL REVIEW REASONING:',
-    review.reasoning,
-    '',
-    'DIALOGUE HISTORY:',
-    history,
-    '',
-    'Respond to the coder\'s last concern. Plain English only — no code. Under 100 words.',
-    'If the coder says "RESOLVED", set resolved: true in your JSON response.',
-    'Return raw JSON only.',
-  ].join('\n')
-}
-
 // ─── OpenAI-compatible message builder ───────────────────────────────────────
 
 export type OpenAIMessage = {
@@ -1023,16 +640,15 @@ export function buildOpenAIMessages(
 
 export abstract class BaseAdapter implements ModelAdapter {
   abstract think(taskDescription: string, contextText?: string): Promise<ThinkingOutput>
-  abstract chat(round: 1 | 2, taskDescription: string, myThinking: ThinkingOutput, otherThinking: ThinkingOutput, previousMessages?: AlignmentMessage[], contextText?: string): Promise<AlignmentMessage>
-  abstract generate(prompt: string, ctx: PipelineContext): AsyncGenerator<string>
-  abstract selfCheck(code: string, spec: SpecDocument, pass: 1 | 2): ReturnType<ModelAdapter['selfCheck']>
-  abstract review(code: string, spec: SpecDocument, round: number, previousReview?: ReviewPayload): Promise<ReviewPayload>
-  abstract reviewerEdit(code: string, spec: SpecDocument, review: ReviewPayload, round: number): Promise<ReviewEdit>
-  abstract coderVerify(originalCode: string, edit: ReviewEdit, mergedCode: string, review: ReviewPayload): Promise<CoderVerification>
-  abstract coderDialogue(code: string, dialogue: DialogueSummary, verification: CoderVerification): Promise<string>
-  abstract reviewerDialogue(code: string, dialogue: DialogueSummary, review: ReviewPayload): Promise<{ response: string; resolved: boolean }>
+  abstract chat(taskDescription: string, otherThinking: ThinkingOutput, myThinking: ThinkingOutput, round: 1 | 2): Promise<AlignmentMessage>
   abstract getProvider(): Provider
   abstract getModelId(): string
+
+  // ─── Provider-specific primitives (implemented by concrete adapters) ───────
+  // A single non-streaming completion — used for the JSON-returning calls below.
+  protected abstract completeNonStreaming(systemPrompt: string, userMsg: string): Promise<string>
+  // A streaming completion — used for raw code generation.
+  protected abstract stream(systemPrompt: string, userMsg: string, onToken: (token: string) => void): Promise<void>
 
   estimateCost(inputTokens: number, outputTokens: number): number {
     const id = this.getModelId()
@@ -1054,34 +670,257 @@ export abstract class BaseAdapter implements ModelAdapter {
       timestamp:         Date.now(),
     }
   }
+
+  // completeNonStreaming/stream only label errors generically ('completeNonStreaming',
+  // 'stream') since they're shared by several call sites — re-wrap with the specific
+  // phase here so failures stay identifiable to the user (which round/file/conflict).
+  private wrapPhaseError(err: unknown, phase: string): Error {
+    const message = err instanceof Error ? err.message : String(err)
+    return new Error(`[${phase}] ${message}`)
+  }
+
+  // ─── Phase 2: R1/R2 jointly propose spec + file manifest ───────────────────
+
+  async proposeSpecAndManifest(
+    taskDescription: string,
+    questions:       Question[],
+    answers:         Record<string, string>,
+    contextText?:    string,
+  ): Promise<{ spec: SpecDocument; manifest: FileManifest }> {
+    const contextBlock = contextText ? `\nCODEBASE CONTEXT:\n${contextText}\n` : ''
+    const userMsg = [
+      `TASK: ${taskDescription}`,
+      `\nQUESTIONS AND ANSWERS:\n${JSON.stringify(
+        questions.map(q => ({ q: q.text, a: answers[q.id] ?? 'not answered' })),
+        null, 2
+      )}`,
+      contextBlock,
+    ].join('\n')
+    let raw: string
+    try {
+      raw = await this.completeNonStreaming(PROPOSE_SPEC_MANIFEST_SYSTEM_PROMPT, userMsg)
+    } catch (err) {
+      throw this.wrapPhaseError(err, 'proposeSpecAndManifest')
+    }
+    const result = parseSpecAndManifest(raw, taskDescription, answers)
+    if (result) return result
+    // Fallback — parse failed. id/project_id/session_id are session metadata the
+    // orchestrator backfills after receiving this result.
+    return {
+      spec: {
+        id:                  generateId(),
+        project_id:          '',
+        session_id:          '',
+        created_at:          new Date().toISOString(),
+        task_description:    taskDescription,
+        user_decisions:      answers,
+        model_defaults:      {},
+        acceptance_criteria: [],
+        edge_cases:          [],
+        error_messages:      [],
+        human_confirmed:     false,
+      },
+      manifest: {
+        mode: 'single',
+        files: [{ filename: 'output.ts', purpose: 'main output',
+                  exports: [], imports: {} }],
+        generation_order: ['output.ts'],
+        reasoning: 'Fallback — parse failed',
+      },
+    }
+  }
+
+  // ─── Phase 3: DeepSeek generates the current file ──────────────────────────
+
+  async generate(
+    filename:       string,
+    fileDef:        FileDefinition,
+    manifest:       FileManifest,
+    spec:           SpecDocument,
+    generatedSoFar: Record<string, string>,
+    contextText:    string | undefined,
+    onToken:        (token: string) => void,
+  ): Promise<{ code: string; tokensOut: number }> {
+    const directDeps = Object.keys(fileDef.imports)
+      .filter(dep => generatedSoFar[dep])
+    const depContext = manifest.files
+      .filter(f => f.filename !== filename && generatedSoFar[f.filename])
+      .map(f => directDeps.includes(f.filename)
+        ? `// === ${f.filename} (full code) ===\n${generatedSoFar[f.filename]}`
+        : `// === ${f.filename} exports: ${f.exports.join(', ')} ===`)
+      .join('\n\n')
+    const userMsg = [
+      `GENERATE: ${filename}`,
+      `PURPOSE: ${fileDef.purpose}`,
+      `MUST EXPORT: ${fileDef.exports.join(', ') || '(none)'}`,
+      `IMPORTS NEEDED: ${Object.entries(fileDef.imports)
+        .map(([f,s]) => `${s.join(',')} from '${f}'`).join('; ') || 'none'}`,
+      '\nSPECIFICATION:',
+      JSON.stringify(spec, null, 2),
+      contextText ? `\nCODEBASE CONTEXT:\n${contextText}` : '',
+      depContext   ? `\nGENERATED DEPENDENCIES:\n${depContext}` : '',
+    ].filter(Boolean).join('\n')
+
+    // Use streaming — follow the same pattern as the existing generate() method
+    let code = ''
+    try {
+      await this.stream(GENERATION_SYSTEM_PROMPT, userMsg, (token) => {
+        code += token
+        onToken(token)
+      })
+    } catch (err) {
+      throw this.wrapPhaseError(err, `generate:${filename}`)
+    }
+    // Strip accidental outer fence
+    const clean = code.replace(/^```[^\n]*\n([\s\S]*?)```\s*$/m, '$1').trim()
+    // onToken fires once per network chunk, not once per LLM token, so it can't be
+    // used as a token count — estimate from the final code length instead.
+    return { code: clean, tokensOut: estimateTokens(clean) }
+  }
+
+  // ─── Phase 3: R1/R2 review the file and produce drop-in fix hunks ──────────
+
+  async reviewAndPatch(
+    filename:       string,
+    code:           string,
+    spec:           SpecDocument,
+    manifest:       FileManifest,
+    round:          number,
+    previousHunks?: ReviewHunk[],
+  ): Promise<ReviewHunk[]> {
+    const fileDef   = manifest.files.find(f => f.filename === filename)
+    const prevBlock = previousHunks?.length
+      ? `\nPREVIOUS UNRESOLVED ISSUES (focus on these):\n${JSON.stringify(previousHunks.map(h => ({ id: h.id, issue: h.issue })), null, 2)}`
+      : ''
+    const userMsg = [
+      `FILE: ${filename}`,
+      `PURPOSE: ${fileDef?.purpose ?? ''}`,
+      `EXPECTED EXPORTS: ${fileDef?.exports.join(', ') ?? ''}`,
+      '\nCODE:\n' + code,
+      '\nSPECIFICATION:\n' + JSON.stringify(spec, null, 2),
+      `\nRound ${round}/3.${prevBlock}`,
+    ].join('\n')
+    try {
+      const raw = await this.completeNonStreaming(REVIEW_AND_PATCH_SYSTEM_PROMPT, userMsg)
+      return parseReviewHunks(raw, round)
+    } catch (err) {
+      throw this.wrapPhaseError(err, `reviewAndPatch:${filename}:round${round}`)
+    }
+  }
+
+  // ─── Phase 3: cross-review a conflicting hunk ───────────────────────────────
+
+  async crossReview(
+    conflict:  HunkConflict,
+    myHunk:    ReviewHunk,
+    theirHunk: ReviewHunk,
+  ): Promise<CrossReviewResponse> {
+    const userMsg = [
+      `CONFLICT ID: ${conflict.id}`,
+      `FILE: ${conflict.filename} lines ${conflict.line_start}-${conflict.line_end}`,
+      '\nORIGINAL CODE:\n' + conflict.original_code,
+      '\nYOUR FIX:\n' + myHunk.fixed_code,
+      '\nYOUR REASONING: ' + myHunk.issue,
+      '\nOTHER REVIEWER\'S FIX:\n' + theirHunk.fixed_code,
+      '\nOTHER REVIEWER\'S REASONING: ' + theirHunk.issue,
+    ].join('\n')
+    try {
+      const raw = await this.completeNonStreaming(CROSS_REVIEW_SYSTEM_PROMPT, userMsg)
+      return parseCrossReviewResponse(raw, conflict.id)
+    } catch (err) {
+      throw this.wrapPhaseError(err, `crossReview:${conflict.id}`)
+    }
+  }
+
+  // ─── Phase 3: coder mechanically applies reviewer-decided patches ──────────
+
+  async applyPatch(
+    filename:     string,
+    originalCode: string,
+    hunks:        ResolvedHunk[],
+    onToken:      (token: string) => void,
+  ): Promise<{ code: string; tokensOut: number }> {
+    const sortedHunks = [...hunks].sort((a, b) => b.line_start - a.line_start)
+    const userMsg = [
+      'Apply these exact patches to the file.',
+      'Do NOT modify any code outside the specified line ranges.',
+      'Output the COMPLETE updated file.',
+      '',
+      `FILE (${filename}):`,
+      originalCode,
+      '',
+      'PATCHES (apply exactly as specified):',
+      ...sortedHunks.map(h =>
+        `Lines ${h.line_start}-${h.line_end} → replace with:\n${h.new_code}`
+      ),
+    ].join('\n')
+
+    let code = ''
+    try {
+      await this.stream(APPLY_PATCH_SYSTEM_PROMPT, userMsg, (token) => {
+        code += token
+        onToken(token)
+      })
+    } catch (err) {
+      throw this.wrapPhaseError(err, `applyPatch:${filename}`)
+    }
+    const clean = code.replace(/^```[^\n]*\n([\s\S]*?)```\s*$/m, '$1').trim()
+    return { code: clean, tokensOut: estimateTokens(clean) }
+  }
+
+  // ─── Output gate: ad-hoc human-requested fix ───────────────────────────────
+
+  async fixFile(
+    filename:    string,
+    code:        string,
+    instruction: string,
+    onToken:     (token: string) => void,
+  ): Promise<{ code: string; tokensOut: number }> {
+    const userMsg = [
+      `FILE (${filename}):`,
+      code,
+      '',
+      `HUMAN INSTRUCTION: ${instruction}`,
+    ].join('\n')
+
+    let updated = ''
+    try {
+      await this.stream(FIX_FILE_SYSTEM_PROMPT, userMsg, (token) => {
+        updated += token
+        onToken(token)
+      })
+    } catch (err) {
+      throw this.wrapPhaseError(err, `fixFile:${filename}`)
+    }
+    const clean = updated.replace(/^```[^\n]*\n([\s\S]*?)```\s*$/m, '$1').trim()
+    return { code: clean, tokensOut: estimateTokens(clean) }
+  }
 }
 
 // Re-export phase identifier for logging
 export function phaseLabel(phase: PipelinePhase): string {
   const labels: Record<PipelinePhase, string> = {
-    idle:                   'Idle',
-    phase0_context:         'Phase 0: Context',
-    phase1_thinking:        'Phase 1: Thinking',
-    phase1_5_alignment:     'Phase 1.5: Alignment',
-    phase2_questions:       'Phase 2: Questions',
-    phase2_answering:       'Phase 2: Answering',
-    phase2_contradictions:  'Phase 2: Contradictions',
-    phase2_spec:            'Phase 2: Spec',
-    phase2_spec_confirm:    'Phase 2: Spec Confirm',
-    phase3_generating:      'Phase 3: Generating',
-    phase3_self_check:      'Phase 3: Self-Check',
-    phase3_reviewing:       'Phase 3: Reviewing',
-    phase3_reviewer_edit:   'Phase 3: Reviewer Editing',
-    phase3_coder_verify:    'Phase 3: Coder Verifying',
-    phase3_dialogue:        'Phase 3: Model Dialogue',
-    phase3_consensus:       'Phase 3: Consensus',
-    phase3_file_gate:       'Phase 3: File Review',
-    phase3_file_feedback:   'Phase 3: File Feedback',
-    conflict_escalated:     'Conflict Escalated',
-    complete:               'Complete',
-    paused:                 'Paused',
-    stopped:                'Stopped',
-    error:                  'Error',
+    idle:                       'Idle',
+    phase0_context:             'Phase 0: Context',
+    phase1_thinking:            'Phase 1: Thinking',
+    phase1_5_alignment:         'Phase 1.5: Alignment',
+    phase2_questions:           'Phase 2: Questions',
+    phase2_answering:           'Phase 2: Answering',
+    phase2_contradiction_check: 'Phase 2: Contradiction Check',
+    phase2_spec_and_manifest:   'Phase 2: Spec + Manifest',
+    phase2_confirm:             'Phase 2: Confirm',
+    phase3_generating:          'Phase 3: Generating',
+    phase3_reviewing:           'Phase 3: Reviewing',
+    phase3_cross_review:        'Phase 3: Cross-Review',
+    phase3_micro_gate:          'Phase 3: Micro-Gate',
+    phase3_patching:            'Phase 3: Patching',
+    phase3_re_review:           'Phase 3: Re-Review',
+    phase3_arbitration:         'Phase 3: Arbitration',
+    output_gate:                'Output Gate',
+    complete:                   'Complete',
+    paused:                     'Paused',
+    stopped:                    'Stopped',
+    error:                      'Error',
   }
   return labels[phase] ?? phase
 }
