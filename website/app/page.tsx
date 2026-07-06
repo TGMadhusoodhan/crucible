@@ -249,7 +249,7 @@ function Install() {
   const getCompose: Record<OS, string> = {
     mac:     `curl -o docker-compose.yml \\\n  https://crucible-website-six.vercel.app/docker-compose.yml`,
     linux:   `curl -o docker-compose.yml \\\n  https://crucible-website-six.vercel.app/docker-compose.yml`,
-    windows: `# In PowerShell or Command Prompt:\ncurl -o docker-compose.yml ^\n  https://crucible-website-six.vercel.app/docker-compose.yml`,
+    windows: `curl -o docker-compose.yml https://crucible-website-six.vercel.app/docker-compose.yml`,
   }
 
   const runApp: Record<OS, { code: string; note: string }> = {
