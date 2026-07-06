@@ -40,4 +40,10 @@ if (fs.existsSync(migrationsFolder)) {
   }
 }
 
+// Purge stale pipeline sessions (>7 days) on startup — safety net for orphaned rows
+try {
+  sqlite.prepare('DELETE FROM pipeline_sessions WHERE updated_at < ?')
+    .run(Date.now() - 7 * 24 * 60 * 60 * 1000)
+} catch { /* table may not exist on very first run before migrations */ }
+
 export { schema }

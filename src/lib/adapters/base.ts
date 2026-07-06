@@ -841,6 +841,59 @@ export function buildOpenAIMessages(
   return messages
 }
 
+// ─── Retry helper ─────────────────────────────────────────────────────────────
+
+const RETRY_DELAYS_MS = [1_000, 4_000, 10_000] as const
+
+function getRetryAfterMs(err: unknown): number | undefined {
+  if (err && typeof err === 'object' && 'headers' in err) {
+    const h = (err as { headers?: Record<string, string> }).headers
+    const ra = h?.['retry-after'] ?? h?.['Retry-After']
+    if (ra) { const ms = parseFloat(ra) * 1_000; if (!isNaN(ms)) return Math.ceil(ms) }
+  }
+  return undefined
+}
+
+function classifyError(err: unknown): 'retryable' | 'fail-fast' | 'no-retry' {
+  if (err && typeof err === 'object' && 'status' in err) {
+    const s = (err as { status: number }).status
+    if (s === 400 || s === 401 || s === 403 || s === 404) return 'fail-fast'
+    if (s === 429 || s === 500 || s === 502 || s === 503 || s === 529) return 'retryable'
+    return 'no-retry'
+  }
+  if (err instanceof TypeError) return 'retryable'  // fetch() network failure
+  const msg = err instanceof Error ? err.message : String(err)
+  // Parse HTTP status embedded in Google/other error messages
+  if (/\b(400|401|403|404)\b/.test(msg)) return 'fail-fast'
+  if (/\b(429|500|502|503|529)\b/.test(msg)) return 'retryable'
+  if (msg.includes('ECONNRESET') || msg.includes('ECONNREFUSED') || msg.toLowerCase().includes('timeout')) {
+    return 'retryable'
+  }
+  return 'no-retry'
+}
+
+export async function withRetry<T>(
+  fn:       () => Promise<T>,
+  onRetry?: (attempt: number, delayMs: number) => void,
+): Promise<T> {
+  let lastErr: unknown
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      lastErr = err
+      if (attempt === RETRY_DELAYS_MS.length) break
+      if (classifyError(err) !== 'retryable') throw err  // fail fast on 4xx / unknown
+      const jitter  = Math.floor(Math.random() * 500)
+      const retryMs = getRetryAfterMs(err) ?? RETRY_DELAYS_MS[attempt]!
+      const delayMs = retryMs + jitter
+      onRetry?.(attempt + 1, delayMs)
+      await new Promise<void>(r => setTimeout(r, delayMs))
+    }
+  }
+  throw lastErr
+}
+
 // ─── Abstract base ────────────────────────────────────────────────────────────
 
 export abstract class BaseAdapter implements ModelAdapter {
@@ -848,6 +901,12 @@ export abstract class BaseAdapter implements ModelAdapter {
   abstract chat(taskDescription: string, otherThinking: ThinkingOutput, myThinking: ThinkingOutput, round: 1 | 2): Promise<AlignmentMessage>
   abstract getProvider(): Provider
   abstract getModelId(): string
+
+  // Set by the orchestrator after adapter creation so retry events reach the SSE stream.
+  retryEmitter?: (attempt: number, delayMs: number) => void
+  setRetryEmitter(fn: (attempt: number, delayMs: number) => void): void {
+    this.retryEmitter = fn
+  }
 
   // ─── Provider-specific primitives (implemented by concrete adapters) ───────
   // A single non-streaming completion — used for the JSON-returning calls below.
@@ -968,13 +1027,21 @@ export abstract class BaseAdapter implements ModelAdapter {
       regenerationHint  ? `\nREGENERATION GUIDANCE — avoid these specific defects:\n${regenerationHint}` : '',
     ].filter(Boolean).join('\n')
 
-    // Use streaming — follow the same pattern as the existing generate() method
+    // Streaming with retry — reset accumulator on each attempt so partial tokens
+    // from a failed attempt are discarded. The UI receives a provider_retry event
+    // (emitted via retryEmitter) to signal it should clear the streaming display.
     let code = ''
     try {
-      await this.stream(GENERATION_SYSTEM_PROMPT, userMsg, (token) => {
-        code += token
-        onToken(token)
-      })
+      await withRetry(
+        async () => {
+          code = ''
+          await this.stream(GENERATION_SYSTEM_PROMPT, userMsg, (token) => {
+            code += token
+            onToken(token)
+          })
+        },
+        this.retryEmitter,
+      )
     } catch (err) {
       throw this.wrapPhaseError(err, `generate:${filename}`)
     }
@@ -1095,10 +1162,16 @@ export abstract class BaseAdapter implements ModelAdapter {
 
     let code = ''
     try {
-      await this.stream(APPLY_PATCH_SYSTEM_PROMPT, userMsg, (token) => {
-        code += token
-        onToken(token)
-      })
+      await withRetry(
+        async () => {
+          code = ''
+          await this.stream(APPLY_PATCH_SYSTEM_PROMPT, userMsg, (token) => {
+            code += token
+            onToken(token)
+          })
+        },
+        this.retryEmitter,
+      )
     } catch (err) {
       throw this.wrapPhaseError(err, `applyPatch:${filename}`)
     }
@@ -1123,10 +1196,16 @@ export abstract class BaseAdapter implements ModelAdapter {
 
     let updated = ''
     try {
-      await this.stream(FIX_FILE_SYSTEM_PROMPT, userMsg, (token) => {
-        updated += token
-        onToken(token)
-      })
+      await withRetry(
+        async () => {
+          updated = ''
+          await this.stream(FIX_FILE_SYSTEM_PROMPT, userMsg, (token) => {
+            updated += token
+            onToken(token)
+          })
+        },
+        this.retryEmitter,
+      )
     } catch (err) {
       throw this.wrapPhaseError(err, `fixFile:${filename}`)
     }

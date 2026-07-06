@@ -421,6 +421,9 @@ export interface ModelAdapter {
     onToken:     (token: string) => void,
   ): Promise<{ code: string; tokensOut: number }>
 
+  // Wire SSE retry notifications (called once by the orchestrator after adapter creation)
+  setRetryEmitter(fn: (attempt: number, delayMs: number) => void): void
+
   // Metadata
   getProvider(): Provider
   getModelId(): string
@@ -692,3 +695,4 @@ export type SSEEvent =
   | { type: 'consensus';             output: ConsensusOutput }
   | { type: 'verify_result';         filename: string; ok: boolean; errors: string[] }
   | { type: 'hunks_dropped';         filename: string; count: number; reasons: string[] }
+  | { type: 'provider_retry';        provider: Provider; attempt: number; delayMs: number }

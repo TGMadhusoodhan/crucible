@@ -13,6 +13,7 @@ import {
   isUnparseableThinkingOutput,
   parseJSON,
   parseThinkingOutput,
+  withRetry,
 } from './base'
 
 export abstract class OpenAICompatibleAdapter extends BaseAdapter {
@@ -126,23 +127,28 @@ export abstract class OpenAICompatibleAdapter extends BaseAdapter {
   // OpenAI's json_object mode only guarantees a top-level object.
   protected async completeNonStreaming(systemPrompt: string, userMsg: string): Promise<string> {
     try {
-      const res = await this.client.chat.completions.create({
-        model:      this.modelId,
-        max_tokens: 8192,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user',   content: userMsg },
-        ],
-      })
-      return res.choices[0]?.message?.content ?? ''
+      return await withRetry(async () => {
+        const res = await this.client.chat.completions.create({
+          model:      this.modelId,
+          max_tokens: 8192,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user',   content: userMsg },
+          ],
+        })
+        return res.choices[0]?.message?.content ?? ''
+      }, this.retryEmitter)
     } catch (err) {
       throw this.wrapError(err, 'completeNonStreaming')
     }
   }
 
+  // stream() is a one-shot primitive — retry for streaming calls is handled at
+  // the generate()/applyPatch()/fixFile() level in BaseAdapter so the token
+  // accumulator can be reset on each attempt.
   protected async stream(systemPrompt: string, userMsg: string, onToken: (token: string) => void): Promise<void> {
     try {
-      const stream = await this.client.chat.completions.create({
+      const s = await this.client.chat.completions.create({
         model:      this.modelId,
         max_tokens: 16384,
         stream:     true,
@@ -151,7 +157,7 @@ export abstract class OpenAICompatibleAdapter extends BaseAdapter {
           { role: 'user',   content: userMsg },
         ],
       })
-      for await (const chunk of stream) {
+      for await (const chunk of s) {
         const delta = chunk.choices[0]?.delta?.content
         if (delta) onToken(delta)
       }

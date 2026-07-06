@@ -1,7 +1,10 @@
 import fs   from 'fs'
 import path from 'path'
+import { eq, lt } from 'drizzle-orm'
 import { getAdapter } from '@/lib/adapters'
 import { getBudgetStatus, recordUsage } from '@/lib/budget'
+import { decrypt } from '@/lib/crypto'
+import { db, schema } from '@/lib/db'
 import { dbg } from '@/lib/debug'
 import { appendSessionLog, logBudgetModeChange, logPause, logPlay, logStop } from '@/lib/memory/session-log'
 import { capturePipelineError } from '@/lib/sentry'
@@ -39,25 +42,131 @@ import type {
 // ─── In-memory stores (global singleton — survives Next.js hot reload) ────────
 
 declare global {
-  var __sessionStore:  Map<string, PipelineSessionState> | undefined
-  var __controlStore:  Map<string, 'pause' | 'stop'>    | undefined
+  var __sessionStore:    Map<string, PipelineSessionState>             | undefined
+  var __controlStore:    Map<string, 'pause' | 'stop'>                | undefined
+  var __runningStore:    Map<string, boolean>                          | undefined
+  var __subscriberStore: Map<string, Set<(e: SSEEvent) => void>>      | undefined
 }
 
 const sessionStore: Map<string, PipelineSessionState> =
-  global.__sessionStore ??= new Map()
+  global.__sessionStore    ??= new Map()
 
 const controlStore: Map<string, 'pause' | 'stop'> =
-  global.__controlStore ??= new Map()
+  global.__controlStore    ??= new Map()
+
+// Run-lock: prevents concurrent runPipeline invocations on the same session.
+// Subscriber set: all active SSE connections for a session share one runner.
+const runningStore:    Map<string, boolean>                     =
+  global.__runningStore    ??= new Map()
+const subscriberStore: Map<string, Set<(e: SSEEvent) => void>> =
+  global.__subscriberStore ??= new Map()
+
+export function removeSubscriber(sessionId: string, fn: (e: SSEEvent) => void): void {
+  subscriberStore.get(sessionId)?.delete(fn)
+}
 
 // ─── Session state CRUD ───────────────────────────────────────────────────────
 
+// Re-hydrate API keys from the encrypted credentials table (keys are never
+// persisted — the stateJson stored in SQLite always has empty-string keys).
+async function rehydrateApiKeys(state: PipelineSessionState): Promise<void> {
+  const fetchKey = async (provider: string): Promise<string> => {
+    const [row] = await db
+      .select({ encryptedKey: schema.apiCredentials.encryptedKey, isValid: schema.apiCredentials.isValid })
+      .from(schema.apiCredentials)
+      .where(eq(schema.apiCredentials.provider, provider))
+      .limit(1)
+    if (!row?.isValid) return ''
+    try { return decrypt(row.encryptedKey) } catch { return '' }
+  }
+  const [coderKey, r1Key, r2Key] = await Promise.all([
+    fetchKey(state.config.coderProvider),
+    fetchKey(state.config.r1Provider),
+    fetchKey(state.config.r2Provider),
+  ])
+  state.config.coderApiKey = coderKey
+  state.config.r1ApiKey    = r1Key
+  state.config.r2ApiKey    = r2Key
+}
+
+// SQLite upsert — fire-and-forget from saveSessionState.
+// API keys are stripped from config before serialisation.
+async function persistSessionToDb(state: PipelineSessionState): Promise<void> {
+  const safeConfig = {
+    ...state.config,
+    coderApiKey: '',  // NEVER persist decrypted keys
+    r1ApiKey:    '',
+    r2ApiKey:    '',
+  }
+  const stateJson = JSON.stringify({ ...state, config: safeConfig })
+  await db.insert(schema.pipelineSessions)
+    .values({
+      sessionId: state.sessionId,
+      projectId: state.projectId,
+      phase:     state.phase,
+      stateJson,
+      updatedAt: state.updatedAt,
+    })
+    .onConflictDoUpdate({
+      target: schema.pipelineSessions.sessionId,
+      set:    { phase: state.phase, stateJson, updatedAt: state.updatedAt },
+    })
+}
+
+// Schedule 24-hour SQLite cleanup for terminal states (output lives on filesystem).
+// If the server restarts before the timer fires, the 7-day startup purge in db/index.ts catches it.
+function scheduleDbCleanup(sessionId: string): void {
+  setTimeout(() => {
+    db.delete(schema.pipelineSessions)
+      .where(eq(schema.pipelineSessions.sessionId, sessionId))
+      .catch(() => {})
+  }, 24 * 60 * 60 * 1000)
+}
+
 export async function getSessionState(sessionId: string): Promise<PipelineSessionState | null> {
-  return sessionStore.get(sessionId) ?? null
+  // Hot path: in-memory (covers all normal operation)
+  const cached = sessionStore.get(sessionId)
+  if (cached) return cached
+
+  // Cold path: SQLite (crash recovery — process was killed between writes)
+  const [row] = await db
+    .select()
+    .from(schema.pipelineSessions)
+    .where(eq(schema.pipelineSessions.sessionId, sessionId))
+    .limit(1)
+  if (!row) return null
+
+  let state: PipelineSessionState
+  try {
+    state = JSON.parse(row.stateJson) as PipelineSessionState
+  } catch (err) {
+    console.error('[session] failed to parse persisted state:', err)
+    return null
+  }
+
+  // Re-inject API keys (they were stripped before saving)
+  try {
+    await rehydrateApiKeys(state)
+  } catch (err) {
+    console.error('[session] failed to re-hydrate API keys:', err)
+  }
+
+  // Warm the in-memory cache so subsequent reads skip SQLite
+  sessionStore.set(sessionId, state)
+  return state
 }
 
 export async function saveSessionState(state: PipelineSessionState): Promise<void> {
   state.updatedAt = Date.now()
   sessionStore.set(state.sessionId, state)
+  // SQLite write is fire-and-forget — never block the pipeline on it
+  persistSessionToDb(state).catch(err =>
+    console.error('[session] sqlite write failed:', err),
+  )
+  // Schedule cleanup for terminal states
+  if (state.phase === 'complete' || state.phase === 'stopped' || state.phase === 'error') {
+    scheduleDbCleanup(state.sessionId)
+  }
 }
 
 // ─── Project output (filesystem — survives restarts + Docker volume) ──────────
@@ -510,30 +619,59 @@ export async function runPipeline(
   sessionId:     string,
   externalEmit?: (event: SSEEvent) => void,
 ): Promise<void> {
-  let state = await getSessionState(sessionId)
-  if (!state) throw new Error(`Session not found: ${sessionId}`)
-
-  if (state.phase === 'paused') {
-    const resumePhase = state.previousPhase ?? 'phase3_generating'
-    state.previousPhase = undefined
-    state = await transition(state, resumePhase)
+  // Attach subscriber BEFORE checking the lock so this connection receives events
+  // even if the pipeline is already running (second browser tab, SSE reconnect, etc.)
+  if (externalEmit) {
+    let subs = subscriberStore.get(sessionId)
+    if (!subs) { subs = new Set(); subscriberStore.set(sessionId, subs) }
+    subs.add(externalEmit)
   }
 
-  const emit      = makeEmit(sessionId, externalEmit)
-  const projectId = state.projectId
-  const { config } = state
+  // Run-lock: check and set synchronously (no await between) — safe in Node's event loop.
+  if (runningStore.get(sessionId)) return  // already running; subscriber is attached above
 
-  dbg.orch('runPipeline start', {
-    sessionId,
-    phase:        state.phase,
-    coderProvider:config.coderProvider,
-    r1Provider:   config.r1Provider,
-    r2Provider:   config.r2Provider,
-  })
+  runningStore.set(sessionId, true)
 
-  const coderAdapter = getAdapter(config.coderProvider, config.coderModelId, config.coderApiKey)
-  const r1Adapter     = getAdapter(config.r1Provider,    config.r1ModelId,    config.r1ApiKey)
-  const r2Adapter     = getAdapter(config.r2Provider,    config.r2ModelId,    config.r2ApiKey)
+  // Broadcast emit — all active SSE connections for this session receive the same events.
+  const emit = (event: SSEEvent): void => {
+    const subs = subscriberStore.get(sessionId)
+    if (!subs) return
+    for (const fn of [...subs]) {
+      try { fn(event) } catch { /* closed connection — silently skip */ }
+    }
+  }
+
+  try {
+    let state = await getSessionState(sessionId)
+    if (!state) throw new Error(`Session not found: ${sessionId}`)
+
+    if (state.phase === 'paused') {
+      const resumePhase = state.previousPhase ?? 'phase3_generating'
+      state.previousPhase = undefined
+      state = await transition(state, resumePhase)
+    }
+
+    const projectId = state.projectId
+    const { config } = state
+
+    dbg.orch('runPipeline start', {
+      sessionId,
+      phase:        state.phase,
+      coderProvider:config.coderProvider,
+      r1Provider:   config.r1Provider,
+      r2Provider:   config.r2Provider,
+    })
+
+    const coderAdapter = getAdapter(config.coderProvider, config.coderModelId, config.coderApiKey)
+    const r1Adapter     = getAdapter(config.r1Provider,    config.r1ModelId,    config.r1ApiKey)
+    const r2Adapter     = getAdapter(config.r2Provider,    config.r2ModelId,    config.r2ApiKey)
+
+    // Wire retry emitters so provider_retry SSE events reach the client
+    const makeRetryEmit = (provider: Provider) => (attempt: number, delayMs: number) =>
+      emit({ type: 'provider_retry', provider, attempt, delayMs })
+    coderAdapter.setRetryEmitter(makeRetryEmit(config.coderProvider))
+    r1Adapter.setRetryEmitter(makeRetryEmit(config.r1Provider))
+    r2Adapter.setRetryEmitter(makeRetryEmit(config.r2Provider))
 
   const maybeStop = async (): Promise<boolean> => {
     const signal = await checkControl(sessionId)
@@ -931,7 +1069,12 @@ export async function runPipeline(
     if (state.phase === 'phase3_arbitration') return
   }
 
-  if (state.phase === 'output_gate') return
+    if (state.phase === 'output_gate') return
+  } finally {
+    // Release run-lock and clear subscribers — executes on any exit path (return, throw, gate)
+    runningStore.delete(sessionId)
+    subscriberStore.delete(sessionId)
+  }
 }
 
 // ─── Actionable hunk predicate ────────────────────────────────────────────────

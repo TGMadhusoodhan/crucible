@@ -56,6 +56,18 @@ export const sessionCosts = sqliteTable('session_costs', {
   tokens:    integer('tokens').notNull().default(0),
 })
 
+// ─── Pipeline Sessions — crash-recovery checkpoints ──────────────────────────
+// API keys are NEVER stored here — stripped before JSON.stringify, re-hydrated
+// from api_credentials on load.
+
+export const pipelineSessions = sqliteTable('pipeline_sessions', {
+  sessionId: text('session_id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  phase:     text('phase').notNull(),
+  stateJson: text('state_json').notNull(),
+  updatedAt: integer('updated_at').notNull(),   // unix ms
+})
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type Project        = typeof projects.$inferSelect

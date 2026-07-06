@@ -13,6 +13,7 @@ import {
   isUnparseableThinkingOutput,
   parseJSON,
   parseThinkingOutput,
+  withRetry,
 } from './base'
 
 type GeminiStreamChunk = {
@@ -57,24 +58,26 @@ export class GoogleAdapter extends BaseAdapter {
     userPrompt:   string,
     maxTokens = 8192,
   ): Promise<{ text: string; tokens: number }> {
-    const res = await fetch(
-      `${this.baseUrl}/models/${this.modelId}:generateContent?key=${this.apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemPrompt }] },
-          contents:          [{ role: 'user', parts: [{ text: userPrompt }] }],
-          generationConfig:  { maxOutputTokens: maxTokens },
-        }),
-      },
-    )
-    if (!res.ok) throw new Error(`Google API error ${res.status}: ${await res.text()}`)
-    const data   = await res.json() as GeminiResponse
-    const text   = data.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
-    if (!text.trim()) throw new Error('empty response from Google model — retrying')
-    const tokens = data.usageMetadata?.totalTokenCount ?? 0
-    return { text, tokens }
+    return withRetry(async () => {
+      const res = await fetch(
+        `${this.baseUrl}/models/${this.modelId}:generateContent?key=${this.apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            contents:          [{ role: 'user', parts: [{ text: userPrompt }] }],
+            generationConfig:  { maxOutputTokens: maxTokens },
+          }),
+        },
+      )
+      if (!res.ok) throw new Error(`Google API error ${res.status}: ${await res.text()}`)
+      const data   = await res.json() as GeminiResponse
+      const text   = data.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
+      if (!text.trim()) throw new Error('empty response from Google model — retrying')
+      const tokens = data.usageMetadata?.totalTokenCount ?? 0
+      return { text, tokens }
+    }, this.retryEmitter)
   }
 
   // ─── Phase 1: Thinking ──────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ import {
   isUnparseableThinkingOutput,
   parseJSON,
   parseThinkingOutput,
+  withRetry,
 } from './base'
 
 function wrapErr(err: unknown, phase: string, modelId: string): Error {
@@ -131,28 +132,32 @@ export class ClaudeAdapter extends BaseAdapter {
 
   protected async completeNonStreaming(systemPrompt: string, userMsg: string): Promise<string> {
     try {
-      const res = await this.client.messages.create({
-        model:      this.modelId,
-        max_tokens: 8192,
-        system:     systemPrompt,
-        messages:   [{ role: 'user', content: userMsg }],
-      })
-      const block = res.content[0]
-      return block?.type === 'text' ? block.text : ''
+      return await withRetry(async () => {
+        const res = await this.client.messages.create({
+          model:      this.modelId,
+          max_tokens: 8192,
+          system:     systemPrompt,
+          messages:   [{ role: 'user', content: userMsg }],
+        })
+        const block = res.content[0]
+        return block?.type === 'text' ? block.text : ''
+      }, this.retryEmitter)
     } catch (err) {
       throw wrapErr(err, 'completeNonStreaming', this.modelId)
     }
   }
 
+  // stream() is a one-shot primitive — retry is handled at the generate()/applyPatch()/
+  // fixFile() level in BaseAdapter so the token accumulator can be reset on each attempt.
   protected async stream(systemPrompt: string, userMsg: string, onToken: (token: string) => void): Promise<void> {
     try {
-      const stream = this.client.messages.stream({
+      const s = this.client.messages.stream({
         model:      this.modelId,
         max_tokens: 32768,
         system:     systemPrompt,
         messages:   [{ role: 'user', content: userMsg }],
       })
-      for await (const event of stream) {
+      for await (const event of s) {
         if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
           onToken(event.delta.text)
         }

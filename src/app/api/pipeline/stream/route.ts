@@ -1,4 +1,4 @@
-import { getSessionState, runPipeline } from '@/lib/pipeline/orchestrator'
+import { getSessionState, removeSubscriber, runPipeline } from '@/lib/pipeline/orchestrator'
 import { serializeHeartbeat } from '@/lib/conversation/event-log'
 import { captureApiError } from '@/lib/sentry'
 import type { SSEEvent } from '@/types'
@@ -37,8 +37,6 @@ export async function GET(request: Request): Promise<Response> {
         try { controller.close() } catch { /* already closed */ }
       }
 
-      request.signal.addEventListener('abort', close)
-
       const send = (event: SSEEvent): void => {
         if (closed) return
         try {
@@ -56,6 +54,13 @@ export async function GET(request: Request): Promise<Response> {
           closed = true
         }
       }
+
+      // Remove this connection's send from the subscriber set when the client disconnects.
+      // The pipeline runner (if still executing) continues and emits to remaining subscribers.
+      request.signal.addEventListener('abort', () => {
+        removeSubscriber(sessionId, send)
+        close()
+      })
 
       const currentState = await getSessionState(sessionId)
       if (!currentState) { close(); return }
