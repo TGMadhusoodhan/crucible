@@ -10,7 +10,6 @@ import type {
   FileDefinition,
   FileManifest,
   HunkConflict,
-  HunkVerdict,
   ModelAdapter,
   PipelinePhase,
   PreviousHunkRecord,
@@ -618,7 +617,7 @@ export function filterHunksByAnchor(
       continue
     }
     const reason = `hunk ${hunk.id} (${hunk.filename} ~L${hunk.line_start}): original_code not found in file`
-    console.warn(`[reviewAndPatch] dropped hunk — ${reason}`)
+    dbg.review(`dropped hunk — ${reason}`)
     dropped.push(reason)
   }
 
@@ -693,7 +692,7 @@ function applyReReviewVerdicts(
         || normalCode.includes(h.original_code!.split('\n').map(l => l.trimEnd()).join('\n'))
       if (!inFile) {
         const reason = `new_issue ${h.id}: original_code not found in file`
-        console.warn(`[reReview] dropped — ${reason}`)
+        dbg.review(`dropped new_issue — ${reason}`)
         droppedReasons.push(reason)
         droppedCount++
         continue
@@ -702,7 +701,7 @@ function applyReReviewVerdicts(
     resultHunks.push(h)
   }
 
-  return { hunks: resultHunks, droppedCount: droppedCount + droppedReasons.length, droppedReasons }
+  return { hunks: resultHunks, droppedCount: droppedReasons.length, droppedReasons }
 }
 
 // Kept for backward compatibility — delegates to applyReReviewVerdicts.
@@ -1052,8 +1051,10 @@ export abstract class BaseAdapter implements ModelAdapter {
       return this.specManifestFallback(taskDescription, answers)
     }
 
-    const result = parseSpecAndManifest(JSON.stringify(validated), taskDescription, answers)
-    return result ?? this.specManifestFallback(taskDescription, answers)
+    return {
+      spec:     buildSpecDocument(validated.spec as Record<string, unknown>, taskDescription, answers),
+      manifest: fileManifestSchema.parse(validated.manifest),
+    }
   }
 
   private specManifestFallback(taskDescription: string, answers: Record<string, string>): { spec: SpecDocument; manifest: FileManifest } {
@@ -1189,7 +1190,7 @@ export abstract class BaseAdapter implements ModelAdapter {
           hunksRaw = await parseWithRepair(
             raw, reviewHunksStrictSchema,
             (err) => this.completeNonStreaming(REVIEW_AND_PATCH_SYSTEM_PROMPT,
-              `Your previous response could not be parsed. Error: ${err}\nOriginal request:\n${userMsg}\n\nRespond with ONLY the corrected JSON array, no markdown fences, no prose.`),
+              `Your previous response could not be parsed as a JSON array of review hunks. Error: ${err}\n\nRespond with ONLY the corrected JSON array, no markdown fences, no prose. If there are no issues respond with [].`),
             phase,
             (reason) => dbg.review('json-repair', { reason, model: this.getModelId() }),
           )
@@ -1225,7 +1226,7 @@ export abstract class BaseAdapter implements ModelAdapter {
           validated = await parseWithRepair(
             raw, reReviewResponseSchema,
             (err) => this.completeNonStreaming(REVIEW_AND_PATCH_REVERIFY_SYSTEM_PROMPT,
-              `Your previous response could not be parsed. Error: ${err}\nOriginal request:\n${userMsg}\n\nRespond with ONLY the corrected JSON, no markdown fences, no prose.`),
+              `Your previous response could not be parsed as a re-review JSON object. Error: ${err}\n\nRespond with ONLY the corrected JSON { verdicts: [...], new_issues: [...] }, no markdown fences, no prose.`),
             `${phase}:reReview`,
             (reason) => dbg.review('json-repair', { reason, model: this.getModelId() }),
           )
@@ -1233,10 +1234,10 @@ export abstract class BaseAdapter implements ModelAdapter {
           return { hunks: [], droppedCount: 0 }
         }
 
-        const { hunks, droppedCount, droppedReasons } = applyReReviewVerdicts(
+        const { hunks, droppedCount } = applyReReviewVerdicts(
           validated.verdicts, validated.new_issues as ReviewHunk[], previousHunkRecords, code, round,
         )
-        return { hunks, droppedCount: droppedCount + droppedReasons.length }
+        return { hunks, droppedCount }
       }
     } catch (err) {
       throw this.wrapPhaseError(err, phase)
