@@ -4,6 +4,47 @@ Append-only. Never overwrite. Each session adds a new entry.
 
 ---
 
+## Session 2026-07-06 16:00
+### Completed
+- PROMPT 6: Native npm distribution — `crucible` CLI launcher, first-run setup, CRUCIBLE_HOME, auto key generation
+### Files Created
+- `bin/crucible.mjs` — launcher CLI (start / doctor / reset --confirm), binds to 127.0.0.1 by default
+- `scripts/postbuild.mjs` — copies .next/static, public/, drizzle/, better-sqlite3 into standalone
+### Files Modified
+- `src/lib/crypto/index.ts` — getKey() reads ENCRYPTION_KEY env first, then ~/.crucible/secret.key (key-file fallback for native installs)
+- `package.json` — added bin, files, engines, description; added postbuild script; removed "private"
+- `sentry.server.config.ts` — initialScope distribution tag ('native' | 'docker') from CRUCIBLE_DISTRIBUTION env
+- `README.md` — native install as primary Quick Start (2 commands), Docker moved to "Alternative" section
+### Decisions Made
+- Data dir flows via CRUCIBLE_HOME (default ~/.crucible) → DATA_DIR is set by launcher to $CRUCIBLE_HOME/data; Docker continues to set DATA_DIR=/data directly (backward compat unchanged)
+- Launcher sets cwd=.next/standalone when spawning server.js so drizzle/ and static paths resolve correctly
+- better-sqlite3 explicitly copied to standalone/node_modules by postbuild (same safety net as Dockerfile)
+- secret.key written mode 0600, never regenerated if file exists; crypto module reads it as fallback for direct server invocations
+- CRUCIBLE_DISTRIBUTION=native injected by launcher; absent in Docker; Sentry tags on this
+### Left Off At
+- tsc clean, 58/58 tests. Commit on main. Acceptance test remaining: npm pack → install tarball → crucible doctor
+
+---
+
+## Session 2026-07-06 15:33
+### Completed
+- PROMPT 5: Budget mode degradation ladder — all four modes now branch real behavior
+### Files Created
+- `src/app/api/pipeline/budget-gate/route.ts` — POST endpoint resolving CRITICAL budget gate
+### Files Modified
+- `src/types/index.ts` — added `phase3_budget_gate` to PipelinePhase, `budgetGateCleared` to state, `options` to reviewAndPatch interface, `budget_degradation` + `budget_gate` to SSEEvent union
+- `src/lib/adapters/base.ts` — `reviewAndPatch` honors `options.highSeverityOnly` (appends prompt instruction), `phaseLabel` updated for new phase
+- `src/lib/pipeline/phase3-review.ts` — accepts `budgetMode`; EFFICIENT passes `highSeverityOnly`; CONSERVATION skips R2 + emits `budget_degradation`; budgetMode logged in session summary
+- `src/lib/pipeline/orchestrator.ts` — CRITICAL budget gate check before each file, round cap EFFICIENT=2/FULL=3, `resolveBudgetGate` exported, `resetPerFileState` clears `budgetGateCleared`
+### Decisions Made
+- CONSERVATION skips R2 at the review stage (not cross-review) so that conflicts never arise naturally — no separate cross-review skip needed
+- budget_gate fires when `phase === 'phase3_generating' && !budgetGateCleared` — `budgetGateCleared` is reset by `resetPerFileState` so each new file must re-clear it
+- Gate resolution endpoint mutates state only, sets phase to `phase3_generating`, lets stream reconnect drive runPipeline (same pattern as resolveMicroGate)
+### Left Off At
+- Commit 276e957 on main. tsc clean, 58/58 tests. Ready for PROMPT 6.
+
+---
+
 ## Session 2026-05-29
 
 ### Completed

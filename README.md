@@ -8,6 +8,54 @@ You bring your own API keys. Crucible is the pipeline.
 
 ---
 
+## Quick start
+
+```bash
+npm install -g crucible
+crucible
+```
+
+That's it. On first run, Crucible auto-generates an encryption key, creates `~/.crucible/`, starts the server on `http://localhost:3000`, and opens your browser. No manual setup.
+
+After the browser opens:
+1. Go to **Settings → API Keys** and add keys for at least two providers
+2. Click **New project** and choose your primary coder and reviewer models
+3. Describe your task and click **Start pipeline**
+
+**Recommended first pairing:** DeepSeek V4 Pro (primary) + Claude Sonnet 4.6 (reviewer). Different training families, genuine blind spot coverage, and ~36M tokens for $25/month vs Claude Pro's 1–2M.
+
+### CLI reference
+
+```bash
+crucible                        # start server (default port 3000)
+crucible start --port 8080      # explicit port (auto-falls back if busy)
+crucible start --host 0.0.0.0   # listen on all interfaces (see warning below)
+crucible doctor                 # environment health check
+crucible reset --confirm        # wipe in-progress sessions for recovery
+```
+
+> **Security note:** Crucible binds to `127.0.0.1` by default. It holds encrypted API keys and writes to the local filesystem. Only use `--host 0.0.0.0` on a private, trusted network.
+
+### Data directory
+
+All data lives in `~/.crucible/` by default. Override with `CRUCIBLE_HOME=/path/to/dir crucible`.
+
+```
+~/.crucible/
+├── secret.key    # AES-256 encryption key — auto-generated, never change
+├── data/
+│   ├── crucible.db              # SQLite — projects, encrypted API keys, budget
+│   └── projects/{id}/
+│       ├── output.json          # Restored automatically when you reopen a project
+│       ├── output/              # Individual accepted files
+│       ├── spec.json            # Locked after Phase 2
+│       ├── session.jsonl        # Append-only event log
+│       └── checkpoints/         # Snapshots at key milestones
+└── logs/
+```
+
+---
+
 ## Why two models?
 
 Every model has blind spots baked in by its training data. The same model that wrote the bug is the one you're asking to find it. Crucible breaks that loop:
@@ -33,54 +81,23 @@ The result: code that has been written, self-checked, independently reviewed, an
 
 ---
 
-## Quick start
+## Alternative: Docker
 
-### 1. Clone and install
+Docker is the recommended option for self-hosting on a server where you want data persistence across reboots.
 
-```bash
-git clone https://github.com/your-org/crucible
-cd crucible
-npm install
-```
-
-### 2. Set your encryption key
-
-```bash
-cp .env.example .env.local
-echo "ENCRYPTION_KEY=$(openssl rand -hex 32)" >> .env.local
-```
-
-> **Important:** Never change `ENCRYPTION_KEY` after the first run. All API keys you store are encrypted with it. If it changes, they become unreadable and must be re-entered.
-
-No external database, cache, or auth service is required. SQLite creates itself on first start.
-
-### 3. Start the app
-
-```bash
-npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000).
-
-### 4. Add API keys and create a project
-
-1. Go to **Settings → API Keys** and add keys for at least two providers
-2. Click **New project** and choose your primary coder and reviewer models
-3. Describe your task and click **Start pipeline**
-
-The pipeline runs automatically until it needs your input (answering questions, confirming the spec, reviewing files). You'll see exactly what each model produced at every step.
-
-**Recommended first pairing:** DeepSeek V4 Pro (primary) + Claude Sonnet 4.6 (reviewer). Different training families, genuine blind spot coverage, and ~36M tokens for $25/month vs Claude Pro's 1–2M.
-
----
-
-## Running with Docker
-
-Docker is recommended for self-hosting — project output persists across container restarts in a named volume.
+### 1. Set your encryption key
 
 ```bash
 cp .env.example .env
-# Add ENCRYPTION_KEY to .env, then:
+# Add to .env:
+ENCRYPTION_KEY=$(openssl rand -hex 32)
+```
+
+> **Important:** Never change `ENCRYPTION_KEY` after the first run. All API keys you store are encrypted with it.
+
+### 2. Start
+
+```bash
 docker compose up -d
 ```
 
@@ -155,11 +172,14 @@ File Gate                                             ← Gate: per-file review
 
 | Variable | Required | Description |
 |---|---|---|
-| `ENCRYPTION_KEY` | **Yes** | AES-256-GCM key for stored API keys. Generate with `openssl rand -hex 32`. Never change after first run. |
-| `DATA_DIR` | No | Where to store project data (default: `./data`) |
+| `CRUCIBLE_HOME` | No | Home directory for Crucible data (default: `~/.crucible`) |
+| `ENCRYPTION_KEY` | No* | AES-256-GCM key for stored API keys. Auto-generated on first run if absent. Docker users must set this manually. |
+| `DATA_DIR` | No | Override for data subdirectory (default: `$CRUCIBLE_HOME/data`) |
 | `NEXT_PUBLIC_APP_URL` | No | App URL — used by OpenRouter for HTTP-Referer (default: `http://localhost:3000`) |
 | `NEXT_PUBLIC_SENTRY_DSN` | No | Sentry error tracking DSN |
 | `SENTRY_AUTH_TOKEN` | No | Sentry source map upload token |
+
+*Required when running via Docker. Auto-generated at `~/.crucible/secret.key` for native installs.
 
 ### Supported providers
 
@@ -183,40 +203,23 @@ Crucible tracks spend per provider and switches modes automatically.
 | Mode | Remaining budget | Effect |
 |---|---|---|
 | `FULL` | > 75% | Normal operation |
-| `EFFICIENT` | 50–75% | Context compression, tighter prompts |
-| `CONSERVATION` | 25–50% | Aggressive compression; archive memory on demand |
-| `CRITICAL` | < 25% | Warning shown; graceful degradation options presented |
+| `EFFICIENT` | 50–75% | HIGH-severity issues only; review rounds capped at 2 |
+| `CONSERVATION` | 25–50% | Single-reviewer mode; R2 idle; `budget_degradation` event emitted |
+| `CRITICAL` | < 25% | Budget gate before each file; spend + estimated cost shown |
 
 Set per-provider monthly caps under **Settings → Budget**.
 
 ---
 
-## Data storage
-
-Everything lives under `DATA_DIR` (`./data` by default). No external services.
-
-```
-./data/
-├── crucible.db              # SQLite — projects, encrypted API keys, budget
-└── projects/
-    └── {projectId}/
-        ├── output.json      # Restored automatically when you reopen a project
-        ├── output/          # Individual accepted files (written at the file gate)
-        ├── spec.json        # Locked after Phase 2 — never overwritten
-        ├── session.jsonl    # Append-only event log
-        ├── reviews.jsonl    # Reviewer flag history per round
-        └── checkpoints/     # Snapshots at key milestones
-```
-
----
-
 ## API key security
 
-API keys stored in the database are encrypted with AES-256-GCM using `ENCRYPTION_KEY`. They are:
+API keys stored in the database are encrypted with AES-256-GCM using the encryption key. They are:
 
 - Never logged on the server or sent to the browser
 - Decrypted only at the moment of an API call, in server memory only
 - Validated with a live API call before being marked valid and stored
+
+The encryption key itself is stored at `~/.crucible/secret.key` (mode 0600) for native installs, or as `ENCRYPTION_KEY` env var for Docker. Never share, move, or change it — all stored API keys depend on it.
 
 ---
 
@@ -268,9 +271,11 @@ API keys stored in the database are encrypted with AES-256-GCM using `ENCRYPTION
 
 ### "Encryption key mismatch" when loading API keys
 
-**Cause:** `ENCRYPTION_KEY` was changed after API keys were stored. All keys are AES-256-GCM encrypted with the value set at storage time.
+**Cause:** The encryption key was changed after API keys were stored.
 
 **Fix:** Delete the affected credentials in **Settings → API Keys** and re-enter them. Encrypted values cannot be recovered after a key change.
+
+For native installs: `~/.crucible/secret.key` must never be deleted or overwritten. Crucible never regenerates it if the file exists.
 
 ---
 
@@ -278,29 +283,25 @@ API keys stored in the database are encrypted with AES-256-GCM using `ENCRYPTION
 
 **Cause:** The model's output wasn't parsed into named file blocks. Multi-file output must use `=== FILE: path ===` … `=== /FILE ===` delimiters.
 
-**Fix:** For single-file tasks, the full response is stored as `output.txt` — this is expected. For multi-file tasks, check the Conversation tab to see the raw model output.
+**Fix:** For single-file tasks, the full response is stored as `output.txt` — this is expected.
 
 ---
 
 ### Files section is empty after the pipeline completes
 
-**Cause:** Individual files under `data/projects/{id}/output/` are only written when you accept each file at the gate. If the pipeline ended before the file gate, the directory is empty.
+**Cause:** Individual files are only written when you accept each file at the gate.
 
-**Fix:** Refresh the Files page. The API hydrates `output/` from `output.json` on the next request. If it's still empty, open the Conversation tab and confirm consensus was reached.
+**Fix:** Refresh the Files page. If still empty, open the Conversation tab and confirm consensus was reached.
 
 ---
 
 ### Task description too long
 
-**Cause:** Task descriptions are capped at 50,000 characters; the context field at 40,000 characters.
-
-**Fix:** Move large code pastes to the **Context** field. If you're still hitting the limit, split the task into phases.
+**Fix:** Move large code pastes to the **Context** field. Descriptions cap at 50,000 characters; context at 40,000.
 
 ---
 
 ### OpenAI models error with "max_tokens too large"
-
-**Cause:** The generation step requests 16,384 completion tokens. Some older GPT-4o model variants have a lower cap.
 
 **Fix:** Update `max_tokens` in `src/lib/adapters/openai-compatible.ts` to match the model's actual limit.
 
@@ -325,15 +326,13 @@ Adding a new model provider touches one file and requires no pipeline changes.
 3. Implement `getProvider()` and any methods that need provider-specific behaviour. Everything else inherits.
 4. Add your provider to the `switch` in `src/lib/adapters/index.ts`
 
-See any of the existing short adapters (`deepseek.ts`, `groq` inside `index.ts`) for working examples.
-
 ---
 
 ## Contributing
 
 ```bash
 git checkout -b feature/my-change
-npx tsx test-logic.mts     # 52 logic tests, no API keys needed
+npx tsx test-logic.mts     # logic tests, no API keys needed
 npx tsc --noEmit           # must be zero errors before opening a PR
 ```
 

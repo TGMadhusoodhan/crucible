@@ -7,6 +7,10 @@ Sentry.init({
 
   debug: false,
 
+  initialScope: {
+    tags: { distribution: process.env.CRUCIBLE_DISTRIBUTION ?? 'docker' },
+  },
+
   // Sentry v10 bug: event.breadcrumbs.values.filter is not a function —
   // breadcrumbs.values is a scope getter in some code paths, not an array.
   // maxBreadcrumbs: 0 ensures values is always [], so .filter() never crashes.

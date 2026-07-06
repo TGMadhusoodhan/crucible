@@ -1,15 +1,35 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'crypto'
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
 
 const ALGORITHM = 'aes-256-gcm'
 const IV_BYTES = 12   // 96-bit IV — recommended for GCM
 const TAG_BYTES = 16  // 128-bit auth tag
 
 function getKey(): Buffer {
-  const hex = process.env.ENCRYPTION_KEY
-  if (!hex) throw new Error('ENCRYPTION_KEY is not set')
-  const key = Buffer.from(hex.trim(), 'hex')
-  if (key.length !== 32) throw new Error('ENCRYPTION_KEY must be 32 bytes (64 hex chars)')
-  return key
+  // 1. Env var — Docker and explicit overrides (backward compat)
+  const fromEnv = process.env.ENCRYPTION_KEY
+  if (fromEnv) {
+    const key = Buffer.from(fromEnv.trim(), 'hex')
+    if (key.length !== 32) throw new Error('ENCRYPTION_KEY must be 32 bytes (64 hex chars)')
+    return key
+  }
+
+  // 2. Key file — native install via crucible launcher
+  const home = process.env.CRUCIBLE_HOME ?? path.join(os.homedir(), '.crucible')
+  const kf   = path.join(home, 'secret.key')
+  if (fs.existsSync(kf)) {
+    const hex = fs.readFileSync(kf, 'utf8').trim()
+    const key = Buffer.from(hex, 'hex')
+    if (key.length !== 32) throw new Error(`secret.key must contain 32 bytes (64 hex chars): ${kf}`)
+    return key
+  }
+
+  throw new Error(
+    'No encryption key found. ' +
+    'Run "crucible" to auto-generate one, or set ENCRYPTION_KEY env var.'
+  )
 }
 
 /**

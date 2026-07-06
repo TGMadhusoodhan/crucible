@@ -1,23 +1,30 @@
 # Current Build Step
-Step: Phase 3 convergence fixes — anchor-based patches
+Step: PROMPT 6 — Native npm distribution
 Status: COMPLETE
 Started: 2026-07-06
 Last Updated: 2026-07-06
 
 ## What Is Done In This Step
 
-- Anchor-based patch apply (`original_code` verbatim field on ReviewHunk)
-- Deterministic `applyResolvedHunks` with string replacement + `failedHunks` fallback
-- Compiler gate (`verify.ts`) feeds diagnostics into next review round
-- Re-review mode (round > 1): FIXED/NOT_FIXED verdicts per previous hunk ID
-- Loop collapsed: `phase3_patching` → `phase3_reviewing` directly (no separate re_review)
-- One regen-before-arbitration at round 3 failure
-- `locateInFile` helper used in both merge (conflict detection) and apply
-- 36/36 hunk-merge tests passing. Zero TypeScript errors.
+- `bin/crucible.mjs` — launcher CLI with `start`, `doctor`, `reset --confirm` commands
+- First-run setup: creates `~/.crucible/data/` + `~/.crucible/logs/`, generates `secret.key` (0600)
+- `CRUCIBLE_HOME` override respected throughout (env → default ~/.crucible)
+- Server bound to 127.0.0.1 by default; `--host 0.0.0.0` as explicit opt-in with warning
+- Port auto-fallback via `net.createServer` probe when requested port is busy
+- Browser auto-opens after 1.5s delay (xdg-open / open / start per platform)
+- `crucible doctor`: Node version, CRUCIBLE_HOME writable, key validity, data dir, DB schema, build present, git, claude CLI, codex CLI — exits non-zero on critical failures
+- `crucible reset --confirm`: wipes `pipeline_sessions` + `session_costs` via inline CJS script against standalone/node_modules/better-sqlite3
+- `scripts/postbuild.mjs`: copies .next/static, public/, drizzle/, better-sqlite3 into standalone
+- `src/lib/crypto/index.ts`: getKey() reads ENCRYPTION_KEY env first, then key file (native fallback)
+- `package.json`: bin, files, engines, description, postbuild script; "private" removed
+- `sentry.server.config.ts`: distribution tag (native | docker) on all events
+- README.md: native install as primary Quick Start, Docker as alternative section
+- tsc clean, 58/58 tests passing
 
 ## What Remains In This Step
 
-- None — convergence fix is code-complete. Not yet live-tested with real API keys.
+- Full smoke test: `npm run build && npm pack && npm install -g crucible-*.tgz && crucible doctor`
+  (requires a complete build environment — deferred to CI / release workflow)
 
 ## Blockers
 
@@ -25,6 +32,6 @@ Last Updated: 2026-07-06
 
 ## Next
 
-- Live end-to-end test with real API keys to verify convergence improvement
-- Optional UI polish (OutputGatePanel line decorations, arbitrated badge)
-- Production Docker smoke test
+- PROMPT 7 (TBD)
+- Workspace linking (P7): link project output to a local folder using the native data dir
+- CLI reviewer backends (P11): crucible now installs cleanly so CLI tool integration is simpler
