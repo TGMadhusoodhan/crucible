@@ -12,7 +12,17 @@ import { capturePipelineError } from '@/lib/sentry'
 import { generateId } from '@/lib/utils'
 import { estimateTokens } from '@/lib/utils/tokens'
 import { mergeReviewHunks, applyResolvedHunks } from '@/lib/utils/hunk-merge'
-import { prepareWorkspaceForSession, writeAcceptedFile } from '@/lib/workspace'
+import { prepareWorkspaceForSession, readWorkspaceFile, writeAcceptedFile } from '@/lib/workspace'
+import {
+  addDecision,
+  appendHistory,
+  commitCrucibleFiles,
+  extractExports,
+  hashContent,
+  updateCrucibleMd,
+  updateProjectSpec,
+  updateRegistryEntry,
+} from '@/lib/workspace/memory'
 import { runPhase0Context }        from './phase0-context'
 import { runPhase1Thinking }       from './phase1-thinking'
 import { runPhase1_5Alignment }    from './phase1-5-alignment'
@@ -33,6 +43,7 @@ import type {
   PipelinePhase,
   PipelineSessionState,
   PreviousHunkRecord,
+  ProjectContext,
   Provider,
   ResolvedHunk,
   ReviewHunk,
@@ -239,17 +250,45 @@ export interface StartPipelineParams {
   contextInput?:   ContextInput
   budgetMode?:     BudgetMode
   workspaceDir?:   string | null
+  projectContext?: ProjectContext
+  projectName?:    string
 }
 
 export async function createSession(params: StartPipelineParams): Promise<string> {
   const sessionId = generateId()
-  const { contextText } = params.contextInput
+  const { contextText: rawContextText } = params.contextInput
     ? runPhase0Context(params.contextInput)
     : { contextText: '' }
+
+  // Inject CRUCIBLE.md as leading context so all pipeline phases have prior state
+  let contextText = rawContextText
+  const ctx = params.projectContext
+  if (ctx?.mode === 'continue' && ctx.crucibleMd) {
+    const preamble = `## Project Memory (CRUCIBLE.md)\n\n${ctx.crucibleMd}`
+    contextText = preamble + (rawContextText ? `\n\n---\n\n${rawContextText}` : '')
+  }
+
+  // Preload registry files into acceptedFiles so phase3 can use them as context
+  // and skip regenerating files the model already accepted in a prior session.
+  const acceptedFiles: Record<string, string> = {}
+  if (params.workspaceDir && ctx?.mode === 'continue' && ctx.fileIndex.length > 0) {
+    let totalBytes = 0
+    const MAX_BYTES = 200_000
+    for (const entry of ctx.fileIndex) {
+      if (totalBytes >= MAX_BYTES) break
+      try {
+        const content = readWorkspaceFile(params.workspaceDir, entry.filename)
+        if (totalBytes + content.length > MAX_BYTES) break
+        acceptedFiles[entry.filename] = content
+        totalBytes += content.length
+      } catch { /* file missing or path invalid — skip */ }
+    }
+  }
 
   dbg.orch('createSession', {
     sessionId,
     projectId:    params.projectId,
+    mode:         ctx?.mode ?? 'new',
     coderProvider:params.config.coderProvider,
     coderModelId: params.config.coderModelId,
     r1Provider:   params.config.r1Provider,
@@ -257,6 +296,7 @@ export async function createSession(params: StartPipelineParams): Promise<string
     r2Provider:   params.config.r2Provider,
     r2ModelId:    params.config.r2ModelId,
     hasContext:   !!contextText,
+    preloaded:    Object.keys(acceptedFiles).length,
   })
 
   const state: PipelineSessionState = {
@@ -266,6 +306,8 @@ export async function createSession(params: StartPipelineParams): Promise<string
     phase:               'phase1_thinking',
     config:              params.config,
     workspaceDir:        params.workspaceDir ?? null,
+    mode:                ctx?.mode ?? 'new',
+    projectName:         params.projectName ?? '',
 
     currentFileIdx:      0,
     currentFilename:     null,
@@ -286,7 +328,7 @@ export async function createSession(params: StartPipelineParams): Promise<string
     regenAttempted:       false,
     regenHint:            undefined,
 
-    acceptedFiles:       {},
+    acceptedFiles,
     streamingCode:       '',
 
     pendingHumanOverrides: [],
@@ -297,6 +339,17 @@ export async function createSession(params: StartPipelineParams): Promise<string
   }
 
   await saveSessionState(state)
+
+  // Log session start to workspace history
+  if (params.workspaceDir) {
+    appendHistory(params.workspaceDir, {
+      type:            'session_started',
+      timestamp:       new Date().toISOString(),
+      sessionId,
+      taskDescription: params.taskDescription,
+    })
+  }
+
   return sessionId
 }
 
@@ -361,6 +414,40 @@ export async function confirmSpec(sessionId: string): Promise<void> {
   }
   state.phase = 'phase3_generating'
   await saveSessionState(state)
+
+  // Update workspace memory (fire-and-forget)
+  const { workspaceDir, spec, fileManifest, questions, answers, projectName = '' } = state
+  if (workspaceDir && spec && fileManifest) {
+    Promise.resolve().then(() => {
+      updateProjectSpec(workspaceDir, spec, fileManifest)
+
+      // Log every answered question as a decision
+      const now = new Date().toISOString()
+      for (const [qId, answerId] of Object.entries(answers ?? {})) {
+        const q    = (questions ?? []).find(q => q.id === qId)
+        const opt  = q?.options.find(o => o.id === answerId)
+        if (!q) continue
+        addDecision(workspaceDir, {
+          timestamp:    now,
+          questionId:   qId,
+          questionText: q.text,
+          answer:       opt?.label ?? answerId,
+          source:       q.is_required ? 'human' : 'auto',
+        })
+      }
+
+      appendHistory(workspaceDir, {
+        type:      'spec_confirmed',
+        timestamp: now,
+        sessionId,
+      })
+
+      updateCrucibleMd(workspaceDir, projectName)
+      void commitCrucibleFiles(workspaceDir, 'crucible: spec confirmed')
+    }).catch(err =>
+      console.warn('[memory] spec confirm update failed:', err instanceof Error ? err.message : err),
+    )
+  }
 }
 
 // ─── Micro-gate + arbitration resolution (HUMAN GATE 3 / 4) ──────────────────
@@ -444,6 +531,11 @@ export async function resolveArbitration(
     state.round = 1
     resetPerFileState(state)
     state.phase = state.currentFileIdx < totalFiles ? 'phase3_generating' : 'output_gate'
+    if (state.workspaceDir) {
+      const wd = state.workspaceDir
+      appendHistory(wd, { type: 'arbitration', timestamp: new Date().toISOString(), sessionId, filename, choice })
+      writeAcceptedFile(wd, filename, finalCode, sessionId, state.round).catch(() => {})
+    }
   } else if (choice === 'accept') {
     const finalCode = state.patchedCode ?? state.currentFileCode ?? ''
     state.acceptedFiles[filename] = finalCode
@@ -451,6 +543,11 @@ export async function resolveArbitration(
     state.round = 1
     resetPerFileState(state)
     state.phase = state.currentFileIdx < totalFiles ? 'phase3_generating' : 'output_gate'
+    if (state.workspaceDir) {
+      const wd = state.workspaceDir
+      appendHistory(wd, { type: 'arbitration', timestamp: new Date().toISOString(), sessionId, filename, choice })
+      writeAcceptedFile(wd, filename, finalCode, sessionId, state.round).catch(() => {})
+    }
   } else {
     // regenerate — round is uncapped this time; stays on the same file
     state.round += 1
@@ -504,6 +601,22 @@ export async function acceptOutputFile(sessionId: string, filename: string): Pro
     state.phase  = 'complete'
     await saveSessionState(state)
     await saveProjectOutput(state.userId, state.projectId, output, state.spec ?? null, sessionId)
+
+    // Log session_completed to workspace history
+    if (state.workspaceDir) {
+      try {
+        const budget = await getBudgetStatus(state.userId, state.sessionId)
+        appendHistory(state.workspaceDir, {
+          type:      'session_completed',
+          timestamp: new Date().toISOString(),
+          sessionId: state.sessionId,
+          costUsd:   budget.sessionCostUsd,
+          files:     Object.keys(output.files),
+        })
+        void commitCrucibleFiles(state.workspaceDir, 'crucible: session complete')
+      } catch { /* non-fatal */ }
+    }
+
     return { done: true }
   }
 
@@ -911,8 +1024,10 @@ export async function runPipeline(
   const getOrder = () => state!.fileManifest?.generation_order ?? ['output.ts']
 
   async function acceptCurrentFile(codeOverride?: string): Promise<void> {
-    const fname = getOrder()[state!.currentFileIdx]!
-    const code  = codeOverride ?? state!.patchedCode ?? state!.currentFileCode!
+    const fname   = getOrder()[state!.currentFileIdx]!
+    const code    = codeOverride ?? state!.patchedCode ?? state!.currentFileCode!
+    const rounds  = state!.round
+    const applied = state!.resolvedHunks?.length ?? 0
     state!.acceptedFiles[fname] = code
     emit({ type: 'file_accepted', filename: fname, code })
     await appendSessionLog(projectId, sessionId, {
@@ -920,9 +1035,35 @@ export async function runPipeline(
       summary: `File accepted: ${fname}`,
     })
     if (state!.workspaceDir) {
-      writeAcceptedFile(state!.workspaceDir, fname, code, sessionId, state!.round).catch(err => {
-        console.warn('[workspace] write failed for', fname, ':', err instanceof Error ? err.message : err)
+      const wd          = state!.workspaceDir
+      const projName    = state!.projectName ?? ''
+      const fileDef     = state!.fileManifest?.files.find(f => f.filename === fname)
+      const summary     = fileDef?.purpose ?? fname
+      const fileExports = extractExports(code, fname)
+      const sha         = hashContent(code)
+      const now         = new Date().toISOString()
+
+      writeAcceptedFile(wd, fname, code, sessionId, rounds).catch(err =>
+        console.warn('[workspace] write failed for', fname, ':', err instanceof Error ? err.message : err),
+      )
+      updateRegistryEntry(wd, {
+        filename:   fname,
+        sha256:     sha,
+        acceptedAt: now,
+        sessionId,
+        exports:    fileExports,
+        summary,
       })
+      appendHistory(wd, {
+        type:      'file_accepted',
+        timestamp: now,
+        sessionId,
+        filename:  fname,
+        rounds,
+        hunksApplied: applied,
+      })
+      updateCrucibleMd(wd, projName)
+      void commitCrucibleFiles(wd, `crucible: accept ${fname}`)
     }
   }
 
@@ -967,6 +1108,21 @@ export async function runPipeline(
         estimatedFileUsd,
       })
       state = await transition(state, 'phase3_budget_gate')
+      return
+    }
+
+    // ── Skip: file already in acceptedFiles (preloaded from registry or resumed) ─
+    // Emit the SSE event so the UI knows the file is available, but skip workspace
+    // writes and history logging — the file was already handled in a prior session.
+
+    if (state.phase === 'phase3_generating' && state.acceptedFiles[filename] !== undefined) {
+      const preloaded = state.acceptedFiles[filename]!
+      emit({ type: 'file_accepted', filename, code: preloaded })
+      await appendSessionLog(projectId, sessionId, {
+        phase: 'phase3_reviewing', actor: 'system',
+        summary: `File carried forward from prior session: ${filename}`,
+      })
+      if (await advanceToNextFile()) continue
       return
     }
 

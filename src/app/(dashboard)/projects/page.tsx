@@ -1,7 +1,314 @@
-export default function ProjectsPage() {
+'use client'
+
+import { useEffect, useState } from 'react'
+import type { ProjectContext } from '@/types'
+
+interface Project {
+  id:           string
+  name:         string
+  description:  string
+  r1Provider:   string
+  r1ModelId:    string
+  r2Provider:   string
+  r2ModelId:    string
+  createdAt:    number
+  workspaceDir: string | null
+}
+
+function Badge({ label, value }: { label: string; value: string }) {
   return (
-    <main className="flex-1 p-8">
-      <h1 className="text-2xl font-semibold">Projects</h1>
-    </main>
+    <span className="inline-flex items-center gap-1 rounded bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">
+      <span className="text-zinc-500">{label}</span>
+      <span className="text-zinc-300">{value}</span>
+    </span>
+  )
+}
+
+function DriftNotice({ files }: { files: string[] }) {
+  if (files.length === 0) return null
+  return (
+    <div className="rounded border border-amber-700/50 bg-amber-950/30 px-3 py-2">
+      <p className="text-xs font-semibold text-amber-400">
+        ⚠ {files.length} file{files.length > 1 ? 's' : ''} edited outside Crucible
+      </p>
+      <ul className="mt-1 space-y-0.5">
+        {files.map(f => (
+          <li key={f} className="font-mono text-xs text-amber-300/80">{f}</li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+function CrucibleMdPanel({ md }: { md: string }) {
+  // Render markdown sections as simple styled blocks
+  const lines  = md.split('\n')
+  const blocks: { type: 'h1' | 'h2' | 'h3' | 'text' | 'code' | 'hr'; content: string }[] = []
+  let inManaged = false
+  for (const line of lines) {
+    if (line.startsWith('<!-- crucible:') && line.includes(':start -->')) { inManaged = true; continue }
+    if (line.startsWith('<!-- crucible:') && line.includes(':end -->'))   { inManaged = false; continue }
+    if (line.startsWith('# '))       blocks.push({ type: 'h1',  content: line.slice(2) })
+    else if (line.startsWith('## ')) blocks.push({ type: 'h2',  content: line.slice(3) })
+    else if (line.startsWith('### '))blocks.push({ type: 'h3',  content: line.slice(4) })
+    else if (line === '---')         blocks.push({ type: 'hr',  content: '' })
+    else                             blocks.push({ type: 'text', content: line })
+  }
+  void inManaged  // used for control flow only
+
+  return (
+    <div className="space-y-1 text-sm text-zinc-300">
+      {blocks.map((b, i) => {
+        if (b.type === 'h1')   return <h1  key={i} className="mt-2 text-lg font-bold text-zinc-100">{b.content}</h1>
+        if (b.type === 'h2')   return <h2  key={i} className="mt-4 text-sm font-semibold uppercase tracking-wider text-zinc-400">{b.content}</h2>
+        if (b.type === 'h3')   return <h3  key={i} className="mt-2 text-sm font-medium text-zinc-300">{b.content}</h3>
+        if (b.type === 'hr')   return <hr  key={i} className="border-zinc-800" />
+        if (!b.content.trim()) return <div key={i} className="h-1" />
+        // Render **bold** and `code` inline
+        const rendered = b.content
+          .replace(/\*\*([^*]+)\*\*/g, '<strong class="text-zinc-200">$1</strong>')
+          .replace(/`([^`]+)`/g, '<code class="rounded bg-zinc-800 px-1 text-xs text-emerald-400">$1</code>')
+          .replace(/^- /, '• ')
+        return (
+          <p key={i}
+            className="leading-relaxed text-zinc-400"
+            // eslint-disable-next-line react/no-danger
+            dangerouslySetInnerHTML={{ __html: rendered }}
+          />
+        )
+      })}
+    </div>
+  )
+}
+
+function DecisionLog({ decisions }: { decisions: ProjectContext['decisions'] }) {
+  if (decisions.length === 0) return <p className="text-xs text-zinc-500">No decisions recorded yet.</p>
+  return (
+    <ul className="space-y-2">
+      {decisions.map((d, i) => (
+        <li key={i} className="rounded border border-zinc-800 bg-zinc-900/50 px-3 py-2">
+          <div className="flex items-start gap-2">
+            <span className="mt-0.5 text-base leading-none">
+              {d.source === 'human' ? '👤' : d.source === 'arbitration' ? '⚖️' : '🤖'}
+            </span>
+            <div className="min-w-0">
+              <p className="text-xs text-zinc-400">{d.questionText}</p>
+              <p className="mt-0.5 text-xs font-medium text-zinc-200">→ {d.answer}</p>
+              <p className="mt-0.5 text-[10px] text-zinc-600">{d.timestamp.slice(0, 10)}</p>
+            </div>
+          </div>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function FileIndex({ entries }: { entries: ProjectContext['fileIndex'] }) {
+  if (entries.length === 0) return <p className="text-xs text-zinc-500">No files accepted yet.</p>
+  return (
+    <div className="overflow-x-auto rounded border border-zinc-800">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="border-b border-zinc-800 bg-zinc-900">
+            <th className="px-3 py-2 text-left font-medium text-zinc-400">File</th>
+            <th className="px-3 py-2 text-left font-medium text-zinc-400">Purpose</th>
+            <th className="px-3 py-2 text-left font-medium text-zinc-400">Key Exports</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map((e, i) => (
+            <tr key={i} className="border-b border-zinc-800/50 last:border-0">
+              <td className="px-3 py-2 font-mono text-emerald-400">{e.filename}</td>
+              <td className="px-3 py-2 text-zinc-400">{e.summary}</td>
+              <td className="px-3 py-2 font-mono text-zinc-500">{e.exports.slice(0, 4).join(', ') || '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+export default function ProjectsPage() {
+  const [projects, setProjects]       = useState<Project[]>([])
+  const [selected, setSelected]       = useState<string | null>(null)
+  const [context, setContext]         = useState<ProjectContext | null>(null)
+  const [ctxLoading, setCtxLoading]   = useState(false)
+  const [listLoading, setListLoading] = useState(true)
+  const [activeTab, setActiveTab]     = useState<'overview' | 'decisions' | 'files'>('overview')
+
+  useEffect(() => {
+    fetch('/api/projects')
+      .then(r => r.json() as Promise<{ success: boolean; data?: Project[] }>)
+      .then(d => { if (d.success && d.data) setProjects(d.data) })
+      .catch(() => {})
+      .finally(() => setListLoading(false))
+  }, [])
+
+  function selectProject(id: string) {
+    setSelected(id)
+    setContext(null)
+    setCtxLoading(true)
+    setActiveTab('overview')
+    fetch(`/api/projects/${id}/context`)
+      .then(r => r.json() as Promise<{ success: boolean; data?: ProjectContext }>)
+      .then(d => { if (d.success && d.data) setContext(d.data) })
+      .catch(() => {})
+      .finally(() => setCtxLoading(false))
+  }
+
+  const selectedProject = projects.find(p => p.id === selected)
+
+  return (
+    <div className="flex h-full w-full overflow-hidden">
+      {/* ─── Project list ─────────────────────────────────────────────────── */}
+      <div className="flex w-64 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950">
+        <div className="border-b border-zinc-800 px-4 py-3">
+          <h2 className="text-sm font-semibold text-zinc-200">Projects</h2>
+        </div>
+        <div className="flex-1 overflow-y-auto p-2">
+          {listLoading && (
+            <p className="px-2 py-3 text-xs text-zinc-500">Loading…</p>
+          )}
+          {!listLoading && projects.length === 0 && (
+            <p className="px-2 py-3 text-xs text-zinc-500">No projects yet.</p>
+          )}
+          {projects.map(p => (
+            <button
+              key={p.id}
+              onClick={() => selectProject(p.id)}
+              className={[
+                'w-full rounded px-3 py-2.5 text-left transition-colors',
+                selected === p.id
+                  ? 'bg-zinc-800 text-zinc-100'
+                  : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200',
+              ].join(' ')}
+            >
+              <p className="truncate text-sm font-medium">{p.name}</p>
+              {p.workspaceDir && (
+                <p className="mt-0.5 truncate font-mono text-[10px] text-zinc-600" title={p.workspaceDir}>
+                  {p.workspaceDir.replace(/^.*[/\\]/, '…/')}
+                </p>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ─── Context panel ─────────────────────────────────────────────────── */}
+      <div className="flex flex-1 flex-col overflow-hidden">
+        {!selected && (
+          <div className="flex h-full items-center justify-center">
+            <p className="text-sm text-zinc-600">Select a project to view its memory</p>
+          </div>
+        )}
+
+        {selected && (
+          <>
+            {/* Header */}
+            <div className="border-b border-zinc-800 px-6 py-4">
+              <div className="flex items-center gap-3">
+                <h1 className="text-base font-semibold text-zinc-100">{selectedProject?.name}</h1>
+                {context && (
+                  <span className={[
+                    'rounded px-2 py-0.5 text-xs font-medium',
+                    context.mode === 'continue'
+                      ? 'bg-emerald-900/40 text-emerald-400'
+                      : 'bg-zinc-800 text-zinc-400',
+                  ].join(' ')}>
+                    {context.mode === 'continue' ? 'Continuing' : 'New'}
+                  </span>
+                )}
+              </div>
+              {selectedProject?.description && (
+                <p className="mt-0.5 text-xs text-zinc-500">{selectedProject.description}</p>
+              )}
+              {selectedProject && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  <Badge label="R1" value={`${selectedProject.r1Provider}/${selectedProject.r1ModelId}`} />
+                  <Badge label="R2" value={`${selectedProject.r2Provider}/${selectedProject.r2ModelId}`} />
+                </div>
+              )}
+            </div>
+
+            {ctxLoading && (
+              <div className="flex flex-1 items-center justify-center">
+                <p className="text-xs text-zinc-500">Loading project memory…</p>
+              </div>
+            )}
+
+            {!ctxLoading && context && (
+              <div className="flex flex-1 flex-col overflow-hidden">
+                {/* Drift notice */}
+                {context.driftedFiles.length > 0 && (
+                  <div className="px-6 pt-4">
+                    <DriftNotice files={context.driftedFiles} />
+                  </div>
+                )}
+
+                {/* Tabs */}
+                <div className="flex gap-0 border-b border-zinc-800 px-6">
+                  {(['overview', 'decisions', 'files'] as const).map(tab => (
+                    <button
+                      key={tab}
+                      onClick={() => setActiveTab(tab)}
+                      className={[
+                        'border-b-2 px-4 py-2.5 text-xs font-medium capitalize transition-colors',
+                        activeTab === tab
+                          ? 'border-blue-500 text-blue-400'
+                          : 'border-transparent text-zinc-500 hover:text-zinc-300',
+                      ].join(' ')}
+                    >
+                      {tab}
+                      {tab === 'decisions' && context.decisions.length > 0 && (
+                        <span className="ml-1.5 rounded-full bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                          {context.decisions.length}
+                        </span>
+                      )}
+                      {tab === 'files' && context.fileIndex.length > 0 && (
+                        <span className="ml-1.5 rounded-full bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                          {context.fileIndex.length}
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Tab content */}
+                <div className="flex-1 overflow-y-auto px-6 py-4">
+                  {activeTab === 'overview' && (
+                    <div>
+                      {context.crucibleMd ? (
+                        <CrucibleMdPanel md={context.crucibleMd} />
+                      ) : (
+                        <p className="text-xs text-zinc-500">
+                          No CRUCIBLE.md yet. Start a pipeline session to generate project memory.
+                        </p>
+                      )}
+                      {context.specSummary && (
+                        <div className="mt-4 rounded border border-zinc-800 bg-zinc-900/50 px-3 py-2">
+                          <p className="text-xs font-medium text-zinc-400">Prior spec</p>
+                          <p className="mt-1 text-xs text-zinc-300">{context.specSummary}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {activeTab === 'decisions' && <DecisionLog decisions={context.decisions} />}
+                  {activeTab === 'files' && <FileIndex entries={context.fileIndex} />}
+                </div>
+              </div>
+            )}
+
+            {!ctxLoading && !context && !selectedProject?.workspaceDir && (
+              <div className="flex flex-1 items-center justify-center">
+                <p className="text-xs text-zinc-500">
+                  No workspace linked to this project. Edit the project to link a local folder.
+                </p>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
   )
 }

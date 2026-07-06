@@ -491,6 +491,8 @@ export interface PipelineSessionState {
   previousPhase?: PipelinePhase
   config:       PipelineConfig
   workspaceDir?: string | null
+  mode?:         'new' | 'continue'
+  projectName?:  string
 
   // Per-file loop tracking
   currentFileIdx:    number
@@ -651,6 +653,43 @@ export interface Checkpoint {
   trigger: 'module_complete' | 'conflict_resolved' | 'human_confirm' | 'manual'
   summary: string
   outputSnapshot: Record<string, string>
+}
+
+// ─── Workspace Memory ─────────────────────────────────────────────────────────
+
+export interface CrucibleDecision {
+  timestamp:    string       // ISO8601
+  questionId?:  string
+  questionText: string
+  answer:       string
+  source:       'human' | 'auto' | 'arbitration'
+}
+
+export interface RegistryEntry {
+  filename:   string
+  sha256:     string
+  acceptedAt: string       // ISO8601
+  sessionId:  string
+  exports:    string[]
+  summary:    string
+}
+
+export type HistoryEvent =
+  | { type: 'session_started';   timestamp: string; sessionId: string; taskDescription: string }
+  | { type: 'question_answered'; timestamp: string; sessionId: string; questionId: string; questionText: string; answer: string; source: 'auto' | 'human' }
+  | { type: 'spec_confirmed';    timestamp: string; sessionId: string }
+  | { type: 'file_accepted';     timestamp: string; sessionId: string; filename: string; rounds: number; hunksApplied: number }
+  | { type: 'arbitration';       timestamp: string; sessionId: string; filename: string; choice: string }
+  | { type: 'session_completed'; timestamp: string; sessionId: string; costUsd: number; files: string[] }
+
+export interface ProjectContext {
+  specSummary:    string
+  decisions:      CrucibleDecision[]
+  fileIndex:      RegistryEntry[]
+  driftedFiles:   string[]
+  untrackedFiles: string[]
+  crucibleMd:     string | null
+  mode:           'new' | 'continue'
 }
 
 // ─── Budget ───────────────────────────────────────────────────────────────────

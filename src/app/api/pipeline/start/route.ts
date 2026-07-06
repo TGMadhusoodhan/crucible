@@ -5,6 +5,7 @@ import { db, schema } from '@/lib/db'
 import { decrypt } from '@/lib/crypto'
 import { createSession } from '@/lib/pipeline/orchestrator'
 import { prepareWorkspaceForSession } from '@/lib/workspace'
+import { loadProjectContext } from '@/lib/workspace/memory'
 import { captureApiError } from '@/lib/sentry'
 import type { ApiResponse, Provider } from '@/types'
 
@@ -65,7 +66,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     }
 
     const [[projectRow], [coderApiKey, r1ApiKey, r2ApiKey]] = await Promise.all([
-      db.select({ workspaceDir: schema.projects.workspaceDir })
+      db.select({ workspaceDir: schema.projects.workspaceDir, name: schema.projects.name })
         .from(schema.projects)
         .where(eq(schema.projects.id, projectId))
         .limit(1),
@@ -75,7 +76,8 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
         getApiKey(r2Provider),
       ]),
     ])
-    const workspaceDir = projectRow?.workspaceDir ?? null
+    const workspaceDir  = projectRow?.workspaceDir ?? null
+    const projectName   = projectRow?.name ?? ''
 
     if (!coderApiKey) {
       return NextResponse.json(
@@ -98,8 +100,10 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       )
     }
 
+    let projectContext = undefined
     if (workspaceDir) {
       await prepareWorkspaceForSession(workspaceDir)
+      projectContext = loadProjectContext(workspaceDir)
     }
 
     const sessionId = await createSession({
@@ -107,6 +111,8 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       projectId,
       taskDescription,
       workspaceDir,
+      projectName,
+      projectContext,
       config: {
         coderProvider: CODER_PROVIDER,
         coderModelId:  CODER_MODEL_ID,
