@@ -810,3 +810,32 @@ Full rewrite of Phase 3 review/patch loop to fix convergence failures.
 
 ### Left Off At
 - Conflict/micro-gate/arbitration logic fully verified server-side. Browser tool (Claude Preview MCP) disconnected before UI visual verification; store hydration fix is correct by inspection. 9 original dev-overlay bugs: all from duplicate React keys (fixed in mergeAcceptanceCriteria/mergeEdgeCases). Additional bugs found post-fix also corrected. Pipeline is production-ready for single-user Docker deployment.
+
+---
+
+## Session 2026-07-06 17:30
+### Completed
+- PROMPT 9: Interface index — TypeScript compiler API signature extraction + tiered context builder
+
+### Files Created
+- `src/lib/workspace/indexer.ts` — syntactic AST indexer (no type-checker); `buildSignatureBlock` + `indexWorkspaceFiles`
+- `src/lib/pipeline/context-builder.ts` — three-tier context builder (T1 12k/T2 6k caps) with demotion/omission logic
+- `test/unit/indexer.test.ts` — 22 tests across 6 fixture categories
+
+### Files Modified
+- `src/types/index.ts` — `signatureBlock?` on RegistryEntry; `registry?` on ModelAdapter.generate/reviewAndPatch
+- `src/lib/workspace/memory.ts` — exported `writeRegistry`
+- `src/lib/adapters/base.ts` — generate() uses context-builder tiers; reviewAndPatch() injects dep sigs for cross-file violation detection
+- `src/lib/pipeline/phase3-generate.ts` — threads registry to generate
+- `src/lib/pipeline/phase3-review.ts` — threads registry to reviewAndPatch
+- `src/lib/pipeline/orchestrator.ts` — backfills sig blocks in createSession; loads sessionRegistry before phase3 loop; stores signatureBlock on file accept
+
+### Decisions Made
+- syntactic-only AST (ts.createSourceFile, no type-checker program) — fast per-file, no project setup needed
+- Tier 1 cap 12k / Tier 2 cap 6k tokens — demote/omit largest-first within cap; note demotion in prompt
+- `writeRegistry` exported from memory.ts — needed by orchestrator + indexer without circular import
+- `registry?` as optional last param — backward-compatible, no concrete adapter overrides needed
+- buildSignatureBlock stored in registry on file accept — future sessions skip re-indexing unchanged files
+
+### Left Off At
+- tsc: 0 errors. 80/80 tests pass. All 9 changed files committed. PROMPT 10 not yet provided.

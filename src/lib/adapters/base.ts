@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { generateId } from '@/lib/utils'
 import { estimateTokens } from '@/lib/utils/tokens'
 import { dbg } from '@/lib/debug'
+import { buildGenerationContext, buildReviewerDepContext } from '@/lib/pipeline/context-builder'
 import type {
   AcceptanceCriterion,
   AlignmentMessage,
@@ -15,6 +16,7 @@ import type {
   PreviousHunkRecord,
   Provider,
   Question,
+  RegistryEntry,
   ResolvedHunk,
   ReviewHunk,
   SpecDocument,
@@ -1087,18 +1089,21 @@ export abstract class BaseAdapter implements ModelAdapter {
     contextText:       string | undefined,
     onToken:           (token: string) => void,
     regenerationHint?: string,
+    registry?:         RegistryEntry[],
   ): Promise<{ code: string; tokensIn: number; tokensOut: number; cacheReadTokens: number; cacheWriteTokens: number }> {
-    const directDeps = Object.keys(fileDef.imports)
-      .filter(dep => generatedSoFar[dep])
-    // depContext is built in manifest generation order and grows append-only as
-    // more files complete. Appending new file content extends the cache prefix;
-    // everything before the new entry remains a cache hit across calls.
-    const depContext = manifest.files
-      .filter(f => f.filename !== filename && generatedSoFar[f.filename])
-      .map(f => directDeps.includes(f.filename)
-        ? `// === ${f.filename} (full code) ===\n${generatedSoFar[f.filename]}`
-        : `// === ${f.filename} exports: ${f.exports.join(', ')} ===`)
-      .join('\n\n')
+    // Tiered dependency context — replaces the flat depContext approach.
+    // Tier 1: direct dep full source (12k cap); Tier 2: other file sig blocks (6k cap);
+    // Tier 3: pending-file one-liners. growss append-only in manifest order for cache hits.
+    const depCtx = buildGenerationContext(
+      filename, fileDef, manifest, registry ?? [], generatedSoFar,
+    )
+    dbg.gen('context-builder', { filename, composition: depCtx.compositionLog })
+
+    const depContext = [
+      depCtx.tier1Text ? `// ─── Direct dependencies (full source) ─────────────────\n${depCtx.tier1Text}` : '',
+      depCtx.tier2Text ? `// ─── Other project files (signatures) ──────────────────\n${depCtx.tier2Text}` : '',
+      depCtx.tier3Text ? `// ─── Pending files (not yet generated) ─────────────────\n${depCtx.tier3Text}` : '',
+    ].filter(Boolean).join('\n\n')
 
     // ── STABLE PREFIX — byte-identical across every file in the session ───────
     // Spec + codebase context come first so providers can cache-hit them on
@@ -1159,6 +1164,8 @@ export abstract class BaseAdapter implements ModelAdapter {
     previousHunkRecords?:  PreviousHunkRecord[],
     compilerErrors?:       string[],
     options?:              { highSeverityOnly?: boolean },
+    registry?:             RegistryEntry[],
+    acceptedFiles?:        Record<string, string>,
   ): Promise<{ hunks: ReviewHunk[]; droppedCount: number }> {
     const fileDef = manifest.files.find(f => f.filename === filename)
 
@@ -1180,11 +1187,16 @@ export abstract class BaseAdapter implements ModelAdapter {
       if (round === 1 || !previousHunkRecords?.length) {
         // ── Initial review ──────────────────────────────────────────────────
         // Spec first → stable prefix cache hit after the first file.
+        // Direct-dep signature blocks so reviewers can catch cross-file contract violations.
+        const depSigs = fileDef && registry?.length
+          ? buildReviewerDepContext(fileDef, registry, acceptedFiles ?? {})
+          : ''
         const userMsg = [
           'SPECIFICATION:\n' + JSON.stringify(spec, null, 2),
           `FILE: ${filename}`,
           `PURPOSE: ${fileDef?.purpose ?? ''}`,
           `EXPECTED EXPORTS: ${fileDef?.exports.join(', ') ?? ''}`,
+          depSigs ? `\nDIRECT DEPENDENCY CONTRACTS (authoritative — flag violations against these):\n${depSigs}` : '',
           compilerBlock,
           '\nCODE (line numbers are display-only — do NOT include them in original_code/fixed_code):\n' + numberedCode,
           severityBlock,

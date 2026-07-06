@@ -1,5 +1,5 @@
 import { appendSessionLog } from '@/lib/memory/session-log'
-import type { FileManifest, ModelAdapter, SpecDocument, SSEEvent } from '@/types'
+import type { FileManifest, ModelAdapter, RegistryEntry, SpecDocument, SSEEvent } from '@/types'
 
 export async function runPhase3Generate(
   projectId:          string,
@@ -14,6 +14,7 @@ export async function runPhase3Generate(
   emit:               (e: SSEEvent) => void,
   contextText?:       string,
   regenerationHint?:  string,
+  registry?:          RegistryEntry[],
 ): Promise<{ code: string; tokensIn: number; tokensOut: number; cacheReadTokens: number; cacheWriteTokens: number }> {
   emit({ type: 'phase_change', phase: 'phase3_generating' })
   emit({ type: 'file_generating', filename, fileIndex, totalFiles })
@@ -25,6 +26,7 @@ export async function runPhase3Generate(
     filename, fileDef, manifest, spec, generatedSoFar, contextText,
     (token) => emit({ type: 'token', text: token }),
     regenerationHint,
+    registry,
   )
 
   emit({ type: 'file_generated', filename, code: result.code })

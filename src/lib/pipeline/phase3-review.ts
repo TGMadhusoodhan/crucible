@@ -1,5 +1,5 @@
 import { appendSessionLog } from '@/lib/memory/session-log'
-import type { BudgetMode, FileManifest, ModelAdapter, PreviousHunkRecord, ReviewHunk, SpecDocument, SSEEvent } from '@/types'
+import type { BudgetMode, FileManifest, ModelAdapter, PreviousHunkRecord, RegistryEntry, ReviewHunk, SpecDocument, SSEEvent } from '@/types'
 
 export async function runPhase3Review(
   projectId:             string,
@@ -15,6 +15,8 @@ export async function runPhase3Review(
   previousHunkRecords?:  PreviousHunkRecord[],
   compilerErrors?:       string[],
   budgetMode?:           BudgetMode,
+  registry?:             RegistryEntry[],
+  acceptedFiles?:        Record<string, string>,
 ): Promise<{ r1: ReviewHunk[]; r2: ReviewHunk[] }> {
   emit({ type: 'phase_change', phase: 'phase3_reviewing' })
 
@@ -28,7 +30,7 @@ export async function runPhase3Review(
   if (budgetMode === 'CONSERVATION') {
     // Single-reviewer mode: only R1 reviews, R2 is idle.
     const r1Result = await r1Adapter.reviewAndPatch(
-      filename, code, spec, manifest, round, previousHunkRecords, compilerErrors,
+      filename, code, spec, manifest, round, previousHunkRecords, compilerErrors, undefined, registry, acceptedFiles,
     )
     r1Hunks = r1Result.hunks
     r2Hunks = []
@@ -44,8 +46,8 @@ export async function runPhase3Review(
     }
   } else {
     const [r1Result, r2Result] = await Promise.all([
-      r1Adapter.reviewAndPatch(filename, code, spec, manifest, round, previousHunkRecords, compilerErrors, reviewOptions),
-      r2Adapter.reviewAndPatch(filename, code, spec, manifest, round, previousHunkRecords, compilerErrors, reviewOptions),
+      r1Adapter.reviewAndPatch(filename, code, spec, manifest, round, previousHunkRecords, compilerErrors, reviewOptions, registry, acceptedFiles),
+      r2Adapter.reviewAndPatch(filename, code, spec, manifest, round, previousHunkRecords, compilerErrors, reviewOptions, registry, acceptedFiles),
     ])
 
     r1Hunks = r1Result.hunks

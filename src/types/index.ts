@@ -394,6 +394,7 @@ export interface ModelAdapter {
     contextText:        string | undefined,
     onToken:            (token: string) => void,
     regenerationHint?:  string,
+    registry?:          RegistryEntry[],
   ): Promise<{ code: string; tokensIn: number; tokensOut: number; cacheReadTokens: number; cacheWriteTokens: number }>
 
   // Phase 3: R1/R2 review the generated file and produce anchor-based fix hunks.
@@ -408,6 +409,8 @@ export interface ModelAdapter {
     previousHunkRecords?:  PreviousHunkRecord[],
     compilerErrors?:       string[],
     options?:              { highSeverityOnly?: boolean },
+    registry?:             RegistryEntry[],
+    acceptedFiles?:        Record<string, string>,
   ): Promise<{ hunks: ReviewHunk[]; droppedCount: number }>
 
   // Phase 3: cross-review — evaluate the other reviewer's conflicting hunk
@@ -666,12 +669,13 @@ export interface CrucibleDecision {
 }
 
 export interface RegistryEntry {
-  filename:   string
-  sha256:     string
-  acceptedAt: string       // ISO8601
-  sessionId:  string
-  exports:    string[]
-  summary:    string
+  filename:        string
+  sha256:          string
+  acceptedAt:      string       // ISO8601
+  sessionId:       string
+  exports:         string[]
+  summary:         string
+  signatureBlock?: string       // compact AST-extracted signature block (indexer.ts)
 }
 
 export type HistoryEvent =

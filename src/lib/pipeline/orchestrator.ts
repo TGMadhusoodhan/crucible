@@ -19,10 +19,13 @@ import {
   commitCrucibleFiles,
   extractExports,
   hashContent,
+  readRegistry,
   updateCrucibleMd,
   updateProjectSpec,
   updateRegistryEntry,
+  writeRegistry,
 } from '@/lib/workspace/memory'
+import { buildSignatureBlock, indexWorkspaceFiles } from '@/lib/workspace/indexer'
 import { runPhase0Context }        from './phase0-context'
 import { runPhase1Thinking }       from './phase1-thinking'
 import { runPhase1_5Alignment }    from './phase1-5-alignment'
@@ -348,6 +351,17 @@ export async function createSession(params: StartPipelineParams): Promise<string
       sessionId,
       taskDescription: params.taskDescription,
     })
+  }
+
+  // Backfill signature blocks for any registry entries that don't have them yet,
+  // or whose file changed since last session (drift detection already updated sha256).
+  if (params.workspaceDir && ctx) {
+    try {
+      const enriched = indexWorkspaceFiles(params.workspaceDir, ctx.fileIndex, ctx.driftedFiles)
+      if (enriched.some((e, i) => e.signatureBlock !== ctx.fileIndex[i]?.signatureBlock)) {
+        writeRegistry(params.workspaceDir, enriched)
+      }
+    } catch { /* non-fatal — context building falls back gracefully */ }
   }
 
   return sessionId
@@ -1050,12 +1064,13 @@ export async function runPipeline(
         console.warn('[workspace] write failed for', fname, ':', err instanceof Error ? err.message : err),
       )
       updateRegistryEntry(wd, {
-        filename:   fname,
-        sha256:     sha,
-        acceptedAt: now,
+        filename:        fname,
+        sha256:          sha,
+        acceptedAt:      now,
         sessionId,
-        exports:    fileExports,
+        exports:         fileExports,
         summary,
+        signatureBlock:  buildSignatureBlock(fname, code),
       })
       appendHistory(wd, {
         type:      'file_accepted',
@@ -1088,6 +1103,10 @@ export async function runPipeline(
     const totalFiles  = getOrder().length
     state.currentFilename = filename
     state.totalFiles      = totalFiles
+
+    // Reload registry each iteration: acceptCurrentFile writes signatureBlock for the
+    // just-accepted file, so each new file sees up-to-date signatures for its predecessors.
+    const sessionRegistry = state.workspaceDir ? readRegistry(state.workspaceDir) : []
 
     if (await maybeStop()) return
 
@@ -1139,6 +1158,7 @@ export async function runPipeline(
           state.acceptedFiles, emit, state.contextText,
           // regenHint was captured before resetPerFileState cleared r1Hunks/compilerErrors
           state.regenAttempted ? state.regenHint : undefined,
+          sessionRegistry,
         )
         state.currentFileCode = genResult.code
         recordAndRefreshBudget(
@@ -1167,6 +1187,8 @@ export async function runPipeline(
           state.previousHunkRecords,
           state.compilerErrors,
           state.budgetMode,
+          sessionRegistry,
+          state.acceptedFiles,
         )
         state.r1Hunks = r1
         state.r2Hunks = r2

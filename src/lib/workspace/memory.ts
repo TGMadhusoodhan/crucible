@@ -123,7 +123,7 @@ export function readRegistry(workspaceDir: string): RegistryEntry[] {
   } catch { return [] }
 }
 
-function writeRegistry(workspaceDir: string, entries: RegistryEntry[]): void {
+export function writeRegistry(workspaceDir: string, entries: RegistryEntry[]): void {
   fs.mkdirSync(path.join(workspaceDir, CRUCIBLE_DIR), { recursive: true })
   fs.writeFileSync(path.join(workspaceDir, CRUCIBLE_DIR, 'registry.json'), JSON.stringify(entries, null, 2))
 }
