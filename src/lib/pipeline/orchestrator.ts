@@ -460,6 +460,21 @@ export async function resolveArbitration(
   await saveSessionState(state)
 }
 
+// ─── Budget gate (CRITICAL mode) ─────────────────────────────────────────────
+// Mutates state only — does NOT call runPipeline. Client reconnects to stream
+// afterward and THAT drives pipeline forward (same pattern as resolveMicroGate).
+
+export async function resolveBudgetGate(sessionId: string): Promise<void> {
+  const state = await getSessionState(sessionId)
+  if (!state) throw new Error(`Session not found: ${sessionId}`)
+  if (state.phase !== 'phase3_budget_gate') {
+    throw new Error(`Session is not waiting at the budget gate (current phase: ${state.phase})`)
+  }
+  state.budgetGateCleared = true
+  state.phase = 'phase3_generating'
+  await saveSessionState(state)
+}
+
 // ─── Output gate (HUMAN GATE 5) ───────────────────────────────────────────────
 // By the time a file reaches the output gate it has already passed the full
 // dual-review loop (or a human already resolved its conflicts). This is the
@@ -603,6 +618,7 @@ function resetPerFileState(state: PipelineSessionState): void {
   state.compilerErrors      = undefined
   state.regenAttempted      = false
   state.regenHint           = undefined
+  state.budgetGateCleared   = false  // next file must re-clear the gate in CRITICAL mode
 }
 
 // ─── Build PreviousHunkRecord list from applied resolved hunks ────────────────
@@ -916,6 +932,29 @@ export async function runPipeline(
 
     if (await maybeStop()) return
 
+    // CRITICAL budget gate — pause before generating each new file.
+    // Returns immediately if already waiting at the gate (client polls after resolution).
+    if (state.phase === 'phase3_budget_gate') return
+
+    if (state.budgetMode === 'CRITICAL' && !state.budgetGateCleared && state.phase === 'phase3_generating') {
+      const budget = await getBudgetStatus(state.userId, state.sessionId)
+      const filesCompleted = state.currentFileIdx
+      const estimatedFileUsd = filesCompleted > 0
+        ? budget.sessionCostUsd / filesCompleted
+        : 0
+      emit({
+        type: 'budget_gate',
+        filename,
+        fileIndex: state.currentFileIdx,
+        totalFiles,
+        spentUsd:        budget.sessionCostUsd,
+        remainingUsd:    budget.totalRemainingUsd,
+        estimatedFileUsd,
+      })
+      state = await transition(state, 'phase3_budget_gate')
+      return
+    }
+
     // ── 3a: Generate ──────────────────────────────────────────────────────
 
     if (state.phase === 'phase3_generating') {
@@ -953,6 +992,7 @@ export async function runPipeline(
           r1Adapter, r2Adapter, emit,
           state.previousHunkRecords,
           state.compilerErrors,
+          state.budgetMode,
         )
         state.r1Hunks = r1
         state.r2Hunks = r2
@@ -1038,8 +1078,8 @@ export async function runPipeline(
         emit({ type: 'verify_result', filename, ok: verify.ok, errors: verify.errors })
         state.compilerErrors = verify.ok ? undefined : verify.errors
 
-        // Check round cap
-        const maxRounds = 3
+        // Check round cap — EFFICIENT mode caps at 2 rounds to reduce reviewer cost
+        const maxRounds = state.budgetMode === 'EFFICIENT' ? 2 : 3
         if (state.round >= maxRounds && !state.regenAttempted) {
           // One regeneration attempt before going to arbitration.
           // IMPORTANT: build the hint before resetPerFileState wipes r1/r2Hunks and

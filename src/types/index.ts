@@ -407,6 +407,7 @@ export interface ModelAdapter {
     round:                 number,
     previousHunkRecords?:  PreviousHunkRecord[],
     compilerErrors?:       string[],
+    options?:              { highSeverityOnly?: boolean },
   ): Promise<{ hunks: ReviewHunk[]; droppedCount: number }>
 
   // Phase 3: cross-review — evaluate the other reviewer's conflicting hunk
@@ -461,6 +462,7 @@ export type PipelinePhase =
   | 'phase3_patching'            // DeepSeek applies resolved patches
   | 'phase3_re_review'           // R1+R2 verify patched file
   | 'phase3_arbitration'         // HUMAN GATE 4 — round 3 exhausted
+  | 'phase3_budget_gate'         // HUMAN GATE (CRITICAL mode) — authorize spend before each file
   | 'output_gate'                // HUMAN GATE 5 — per-file approval
   | 'complete'
   | 'paused'
@@ -527,6 +529,7 @@ export interface PipelineSessionState {
   compilerErrors?:       string[]             // compiler diagnostics from last verify pass
   regenAttempted?:       boolean              // one regen attempt at round 3 before arbitration
   regenHint?:            string               // hint built before resetPerFileState, used in regen generate
+  budgetGateCleared?:    boolean              // CRITICAL: true after human approves this file's spend
 
   // Accepted files (all files)
   acceptedFiles:     Record<string, string>   // filename → final code
@@ -709,3 +712,5 @@ export type SSEEvent =
   | { type: 'hunks_dropped';         filename: string; count: number; reasons: string[] }
   | { type: 'provider_retry';        provider: Provider; attempt: number; delayMs: number }
   | { type: 'usage_update';          provider: Provider; modelId: string; tokensIn: number; tokensOut: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number }
+  | { type: 'budget_degradation';   reason: string; skipped: string[] }
+  | { type: 'budget_gate';          filename: string; fileIndex: number; totalFiles: number; spentUsd: number; remainingUsd: number; estimatedFileUsd: number }

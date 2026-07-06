@@ -1158,6 +1158,7 @@ export abstract class BaseAdapter implements ModelAdapter {
     round:                 number,
     previousHunkRecords?:  PreviousHunkRecord[],
     compilerErrors?:       string[],
+    options?:              { highSeverityOnly?: boolean },
   ): Promise<{ hunks: ReviewHunk[]; droppedCount: number }> {
     const fileDef = manifest.files.find(f => f.filename === filename)
 
@@ -1168,6 +1169,10 @@ export abstract class BaseAdapter implements ModelAdapter {
 
     const compilerBlock = compilerErrors?.length
       ? `\nCOMPILER ERRORS (fix these first — ground truth, not opinions):\n${compilerErrors.join('\n')}`
+      : ''
+
+    const severityBlock = options?.highSeverityOnly
+      ? '\n\nReport ONLY HIGH severity issues. Do not report MEDIUM or LOW severity issues.'
       : ''
 
     const phase = `reviewAndPatch:${filename}:round${round}`
@@ -1182,6 +1187,7 @@ export abstract class BaseAdapter implements ModelAdapter {
           `EXPECTED EXPORTS: ${fileDef?.exports.join(', ') ?? ''}`,
           compilerBlock,
           '\nCODE (line numbers are display-only — do NOT include them in original_code/fixed_code):\n' + numberedCode,
+          severityBlock,
         ].filter(Boolean).join('\n')
         const raw = await this.completeNonStreaming(REVIEW_AND_PATCH_SYSTEM_PROMPT, userMsg)
 
@@ -1390,6 +1396,7 @@ export function phaseLabel(phase: PipelinePhase): string {
     phase3_patching:            'Phase 3: Patching',
     phase3_re_review:           'Phase 3: Re-Review',
     phase3_arbitration:         'Phase 3: Arbitration',
+    phase3_budget_gate:         'Phase 3: Budget Gate',
     output_gate:                'Output Gate',
     complete:                   'Complete',
     paused:                     'Paused',
