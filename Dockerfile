@@ -43,8 +43,8 @@ COPY --from=builder /app/public           ./public
 # Copy native module (better-sqlite3) — Next.js standalone doesn't include it automatically
 COPY --from=builder /app/node_modules/better-sqlite3 ./node_modules/better-sqlite3
 
-# Copy drizzle migrations if they exist (for auto-migrate on startup)
-COPY --from=builder /app/drizzle ./drizzle
+# Copy drizzle migrations (schema SQL for auto-migrate on startup)
+COPY --from=builder /app/drizzle /app/drizzle
 
 EXPOSE 3000
 ENV PORT=3000
