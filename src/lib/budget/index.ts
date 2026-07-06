@@ -32,18 +32,29 @@ function toMode(percentRemaining: number, hasCap: boolean): BudgetMode {
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export async function recordUsage(
-  _userId:      string,   // kept for API compatibility — single user, not used
-  sessionId:    string,
-  provider:     Provider,
-  modelId:      string,
-  inputTokens:  number,
-  outputTokens: number,
+  _userId:           string,   // kept for API compatibility — single user, not used
+  sessionId:         string,
+  provider:          Provider,
+  modelId:           string,
+  inputTokens:       number,
+  outputTokens:      number,
+  cacheReadTokens?:  number,
+  cacheWriteTokens?: number,
 ): Promise<void> {
   const pricing = MODEL_PRICING[modelId]
   if (!pricing) return
 
-  const costUsd  = (inputTokens  / 1_000_000) * pricing.input +
-                   (outputTokens / 1_000_000) * pricing.output
+  // Price cache tokens at their discounted rate when real counts are available.
+  // inputTokens from providers includes cached tokens in the total — subtract them
+  // so they aren't double-billed at full rate.
+  const cr = cacheReadTokens  ?? 0
+  const cw = cacheWriteTokens ?? 0
+  const uncachedInput = Math.max(0, inputTokens - cr - cw)
+  const costUsd =
+    uncachedInput / 1_000_000 * pricing.input +
+    cr            / 1_000_000 * (pricing.cacheRead  ?? pricing.input  * 0.1) +
+    cw            / 1_000_000 * (pricing.cacheWrite ?? pricing.input  * 1.25) +
+    outputTokens  / 1_000_000 * pricing.output
   const totalTok = inputTokens + outputTokens
   const ym       = currentYearMonth()
 

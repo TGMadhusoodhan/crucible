@@ -3,6 +3,7 @@ import type {
   Provider,
   ThinkingOutput,
 } from '@/types'
+import type { StreamUsage } from './base'
 import {
   ALIGNMENT_SYSTEM_PROMPT,
   THINKING_SYSTEM_PROMPT,
@@ -18,6 +19,7 @@ import {
 
 type GeminiStreamChunk = {
   candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>
+  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number }
 }
 type GeminiResponse = {
   candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
@@ -129,7 +131,7 @@ export class GoogleAdapter extends BaseAdapter {
     }
   }
 
-  protected async stream(systemPrompt: string, userMsg: string, onToken: (token: string) => void): Promise<void> {
+  protected async stream(systemPrompt: string, userMsg: string, onToken: (token: string) => void): Promise<StreamUsage> {
     try {
       const res = await fetch(
         `${this.baseUrl}/models/${this.modelId}:streamGenerateContent?key=${this.apiKey}&alt=sse`,
@@ -149,6 +151,8 @@ export class GoogleAdapter extends BaseAdapter {
       const reader  = res.body.getReader()
       const decoder = new TextDecoder()
       let   buffer  = ''
+      let   tokensIn  = 0
+      let   tokensOut = 0
 
       while (true) {
         const { done, value } = await reader.read()
@@ -162,9 +166,15 @@ export class GoogleAdapter extends BaseAdapter {
             const chunk = JSON.parse(line.slice(6)) as GeminiStreamChunk
             const text  = chunk.candidates?.[0]?.content?.parts?.[0]?.text
             if (text) onToken(text)
+            if (chunk.usageMetadata) {
+              tokensIn  = chunk.usageMetadata.promptTokenCount     ?? tokensIn
+              tokensOut = chunk.usageMetadata.candidatesTokenCount ?? tokensOut
+            }
           } catch { /* skip malformed SSE chunks */ }
         }
       }
+      // Google does not support explicit prompt caching — cacheReadTokens always 0.
+      return { tokensIn, tokensOut, cacheReadTokens: 0, cacheWriteTokens: 0 }
     } catch (err) {
       throw this.wrapErr(err, 'stream')
     }

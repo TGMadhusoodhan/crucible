@@ -382,7 +382,7 @@ export interface ModelAdapter {
     contextText:        string | undefined,
     onToken:            (token: string) => void,
     regenerationHint?:  string,
-  ): Promise<{ code: string; tokensOut: number }>
+  ): Promise<{ code: string; tokensIn: number; tokensOut: number; cacheReadTokens: number; cacheWriteTokens: number }>
 
   // Phase 3: R1/R2 review the generated file and produce anchor-based fix hunks.
   // Round 1: full initial review.
@@ -411,7 +411,7 @@ export interface ModelAdapter {
     originalCode: string,
     hunks:        ResolvedHunk[],
     onToken:      (token: string) => void,
-  ): Promise<{ code: string; tokensOut: number }>
+  ): Promise<{ code: string; tokensIn: number; tokensOut: number; cacheReadTokens: number; cacheWriteTokens: number }>
 
   // Output gate: human requests an ad-hoc free-text fix to an already-finalized file
   fixFile(
@@ -419,7 +419,7 @@ export interface ModelAdapter {
     code:        string,
     instruction: string,
     onToken:     (token: string) => void,
-  ): Promise<{ code: string; tokensOut: number }>
+  ): Promise<{ code: string; tokensIn: number; tokensOut: number; cacheReadTokens: number; cacheWriteTokens: number }>
 
   // Wire SSE retry notifications (called once by the orchestrator after adapter creation)
   setRetryEmitter(fn: (attempt: number, delayMs: number) => void): void
@@ -522,6 +522,9 @@ export interface PipelineSessionState {
 
   // Output
   output?: ConsensusOutput    // kept for filesystem compatibility
+
+  // Spec serialized once after Phase 2 confirm — guaranteed byte-identical across all Phase 3 calls
+  specTextCache?:        string
 
   // Meta
   conversationHistory:    Message[]
@@ -696,3 +699,4 @@ export type SSEEvent =
   | { type: 'verify_result';         filename: string; ok: boolean; errors: string[] }
   | { type: 'hunks_dropped';         filename: string; count: number; reasons: string[] }
   | { type: 'provider_retry';        provider: Provider; attempt: number; delayMs: number }
+  | { type: 'usage_update';          provider: Provider; modelId: string; tokensIn: number; tokensOut: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number }

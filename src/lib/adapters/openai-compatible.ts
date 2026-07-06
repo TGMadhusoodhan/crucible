@@ -3,6 +3,7 @@ import type {
   AlignmentMessage,
   ThinkingOutput,
 } from '@/types'
+import type { StreamUsage } from './base'
 import {
   ALIGNMENT_SYSTEM_PROMPT,
   THINKING_SYSTEM_PROMPT,
@@ -146,12 +147,17 @@ export abstract class OpenAICompatibleAdapter extends BaseAdapter {
   // stream() is a one-shot primitive — retry for streaming calls is handled at
   // the generate()/applyPatch()/fixFile() level in BaseAdapter so the token
   // accumulator can be reset on each attempt.
-  protected async stream(systemPrompt: string, userMsg: string, onToken: (token: string) => void): Promise<void> {
+  protected async stream(systemPrompt: string, userMsg: string, onToken: (token: string) => void): Promise<StreamUsage> {
     try {
+      let tokensIn        = 0
+      let tokensOut       = 0
+      let cacheReadTokens = 0
+
       const s = await this.client.chat.completions.create({
-        model:      this.modelId,
-        max_tokens: 16384,
-        stream:     true,
+        model:          this.modelId,
+        max_tokens:     16384,
+        stream:         true,
+        stream_options: { include_usage: true },
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user',   content: userMsg },
@@ -160,7 +166,18 @@ export abstract class OpenAICompatibleAdapter extends BaseAdapter {
       for await (const chunk of s) {
         const delta = chunk.choices[0]?.delta?.content
         if (delta) onToken(delta)
+        if (chunk.usage) {
+          tokensIn  = chunk.usage.prompt_tokens     ?? 0
+          tokensOut = chunk.usage.completion_tokens ?? 0
+          // OpenAI-compatible providers (OpenAI, DeepSeek) report cache hits in
+          // prompt_tokens_details.cached_tokens — not typed in chat completions
+          // but present at runtime when the provider supports prefix caching.
+          const details = (chunk.usage as unknown as Record<string, unknown>)?.prompt_tokens_details as
+            { cached_tokens?: number } | undefined
+          cacheReadTokens = details?.cached_tokens ?? 0
+        }
       }
+      return { tokensIn, tokensOut, cacheReadTokens, cacheWriteTokens: 0 }
     } catch (err) {
       throw this.wrapError(err, 'stream')
     }

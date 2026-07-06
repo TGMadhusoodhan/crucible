@@ -22,18 +22,31 @@ import type {
 import { crossReviewResponseSchema, fileManifestSchema, reviewHunksSchema, thinkingOutputSchema } from '@/types'
 
 // ─── Pricing table (per million tokens) ──────────────────────────────────────
+// cacheRead:  price for tokens that were read from the prompt cache (cache hit)
+// cacheWrite: price for tokens written to the prompt cache (cache creation, if separately billed)
+// Providers that use implicit prefix caching (DeepSeek, OpenAI) charge cacheRead at a discount;
+// cacheWrite == input price (no separate write charge).
 
-export const MODEL_PRICING: Record<string, { input: number; output: number }> = {
-  'deepseek-v4-pro':   { input: 0.435, output: 0.87  },
-  'deepseek-v4-flash': { input: 0.14,  output: 0.28  },
-  'claude-sonnet-4-6': { input: 3.00,  output: 15.00 },
-  'claude-opus-4-7':   { input: 5.00,  output: 25.00 },
-  'gpt-4o':            { input: 2.50,  output: 10.00 },
-  'gpt-5-4':           { input: 2.50,  output: 15.00 },
-  'gpt-5-5':           { input: 5.00,  output: 30.00 },
+export const MODEL_PRICING: Record<string, { input: number; output: number; cacheRead?: number; cacheWrite?: number }> = {
+  'deepseek-v4-pro':   { input: 0.435, output: 0.87,  cacheRead: 0.044, cacheWrite: 0.435 },
+  'deepseek-v4-flash': { input: 0.14,  output: 0.28,  cacheRead: 0.014, cacheWrite: 0.14  },
+  'claude-sonnet-4-6': { input: 3.00,  output: 15.00, cacheRead: 0.30,  cacheWrite: 3.75  },
+  'claude-opus-4-7':   { input: 5.00,  output: 25.00, cacheRead: 0.50,  cacheWrite: 6.25  },
+  'gpt-4o':            { input: 2.50,  output: 10.00, cacheRead: 1.25,  cacheWrite: 2.50  },
+  'gpt-5-4':           { input: 2.50,  output: 15.00, cacheRead: 1.25,  cacheWrite: 2.50  },
+  'gpt-5-5':           { input: 5.00,  output: 30.00, cacheRead: 2.50,  cacheWrite: 5.00  },
   'gemini-pro':        { input: 1.25,  output: 5.00  },
   'mistral-large':     { input: 2.00,  output: 6.00  },
   'qwen3-coder-next':  { input: 0.11,  output: 0.80  },
+}
+
+// ─── Streaming usage shape returned by stream() ───────────────────────────────
+
+export interface StreamUsage {
+  tokensIn:         number
+  tokensOut:        number
+  cacheReadTokens:  number
+  cacheWriteTokens: number
 }
 
 // ─── System prompts ───────────────────────────────────────────────────────────
@@ -913,8 +926,10 @@ export abstract class BaseAdapter implements ModelAdapter {
   // ─── Provider-specific primitives (implemented by concrete adapters) ───────
   // A single non-streaming completion — used for the JSON-returning calls below.
   protected abstract completeNonStreaming(systemPrompt: string, userMsg: string): Promise<string>
-  // A streaming completion — used for raw code generation.
-  protected abstract stream(systemPrompt: string, userMsg: string, onToken: (token: string) => void): Promise<void>
+  // A streaming completion — returns real token usage from the provider's API.
+  // Retry for streaming calls is handled at the generate()/applyPatch()/fixFile()
+  // level in BaseAdapter so the token accumulator can be reset on each attempt.
+  protected abstract stream(systemPrompt: string, userMsg: string, onToken: (token: string) => void): Promise<StreamUsage>
 
   estimateCost(inputTokens: number, outputTokens: number): number {
     const id = this.getModelId()
@@ -1007,37 +1022,46 @@ export abstract class BaseAdapter implements ModelAdapter {
     contextText:       string | undefined,
     onToken:           (token: string) => void,
     regenerationHint?: string,
-  ): Promise<{ code: string; tokensOut: number }> {
+  ): Promise<{ code: string; tokensIn: number; tokensOut: number; cacheReadTokens: number; cacheWriteTokens: number }> {
     const directDeps = Object.keys(fileDef.imports)
       .filter(dep => generatedSoFar[dep])
+    // depContext is built in manifest generation order and grows append-only as
+    // more files complete. Appending new file content extends the cache prefix;
+    // everything before the new entry remains a cache hit across calls.
     const depContext = manifest.files
       .filter(f => f.filename !== filename && generatedSoFar[f.filename])
       .map(f => directDeps.includes(f.filename)
         ? `// === ${f.filename} (full code) ===\n${generatedSoFar[f.filename]}`
         : `// === ${f.filename} exports: ${f.exports.join(', ')} ===`)
       .join('\n\n')
+
+    // ── STABLE PREFIX — byte-identical across every file in the session ───────
+    // Spec + codebase context come first so providers can cache-hit them on
+    // every subsequent file. depContext grows monotonically in manifest order.
+    // ── VARIABLE SUFFIX — changes per file ────────────────────────────────────
     const userMsg = [
-      `GENERATE: ${filename}`,
+      'SPECIFICATION:',
+      JSON.stringify(spec, null, 2),
+      contextText ? `\nCODEBASE CONTEXT:\n${contextText}` : '',
+      depContext  ? `\nGENERATED DEPENDENCIES:\n${depContext}` : '',
+      `\nGENERATE: ${filename}`,
       `PURPOSE: ${fileDef.purpose}`,
       `MUST EXPORT: ${fileDef.exports.join(', ') || '(none)'}`,
       `IMPORTS NEEDED: ${Object.entries(fileDef.imports)
         .map(([f,s]) => `${s.join(',')} from '${f}'`).join('; ') || 'none'}`,
-      '\nSPECIFICATION:',
-      JSON.stringify(spec, null, 2),
-      contextText ? `\nCODEBASE CONTEXT:\n${contextText}` : '',
-      depContext         ? `\nGENERATED DEPENDENCIES:\n${depContext}` : '',
-      regenerationHint  ? `\nREGENERATION GUIDANCE — avoid these specific defects:\n${regenerationHint}` : '',
+      regenerationHint ? `\nREGENERATION GUIDANCE — avoid these specific defects:\n${regenerationHint}` : '',
     ].filter(Boolean).join('\n')
 
     // Streaming with retry — reset accumulator on each attempt so partial tokens
     // from a failed attempt are discarded. The UI receives a provider_retry event
     // (emitted via retryEmitter) to signal it should clear the streaming display.
     let code = ''
+    let usage: StreamUsage = { tokensIn: 0, tokensOut: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
     try {
       await withRetry(
         async () => {
           code = ''
-          await this.stream(GENERATION_SYSTEM_PROMPT, userMsg, (token) => {
+          usage = await this.stream(GENERATION_SYSTEM_PROMPT, userMsg, (token) => {
             code += token
             onToken(token)
           })
@@ -1047,11 +1071,14 @@ export abstract class BaseAdapter implements ModelAdapter {
     } catch (err) {
       throw this.wrapPhaseError(err, `generate:${filename}`)
     }
-    // Strip accidental outer fence
     const clean = code.replace(/^```[^\n]*\n([\s\S]*?)```\s*$/m, '$1').trim()
-    // onToken fires once per network chunk, not once per LLM token, so it can't be
-    // used as a token count — estimate from the final code length instead.
-    return { code: clean, tokensOut: estimateTokens(clean) }
+    return {
+      code:             clean,
+      tokensIn:         usage.tokensIn,
+      tokensOut:        usage.tokensOut || estimateTokens(clean),
+      cacheReadTokens:  usage.cacheReadTokens,
+      cacheWriteTokens: usage.cacheWriteTokens,
+    }
   }
 
   // ─── Phase 3: R1/R2 review the file and produce anchor-based fix hunks ──────
@@ -1081,13 +1108,14 @@ export abstract class BaseAdapter implements ModelAdapter {
     try {
       if (round === 1 || !previousHunkRecords?.length) {
         // ── Initial review ──────────────────────────────────────────────────
+        // Spec first → stable prefix cache hit after the first file.
         const userMsg = [
+          'SPECIFICATION:\n' + JSON.stringify(spec, null, 2),
           `FILE: ${filename}`,
           `PURPOSE: ${fileDef?.purpose ?? ''}`,
           `EXPECTED EXPORTS: ${fileDef?.exports.join(', ') ?? ''}`,
           compilerBlock,
           '\nCODE (line numbers are display-only — do NOT include them in original_code/fixed_code):\n' + numberedCode,
-          '\nSPECIFICATION:\n' + JSON.stringify(spec, null, 2),
         ].filter(Boolean).join('\n')
         const raw = await this.completeNonStreaming(REVIEW_AND_PATCH_SYSTEM_PROMPT, userMsg)
         const { hunks, droppedCount } = parseReviewHunks(raw, round, code)
@@ -1097,14 +1125,15 @@ export abstract class BaseAdapter implements ModelAdapter {
         const prevBlock = previousHunkRecords.map(r =>
           `  { "id": "${r.id}", "issue": "${r.issue}", "original_code": ${JSON.stringify(r.original_code)}, "fixed_code": ${JSON.stringify(r.fixed_code)} }`
         ).join(',\n')
+        // Spec first → stable prefix cache hit across re-review rounds.
         const userMsg = [
+          'SPECIFICATION:\n' + JSON.stringify(spec, null, 2),
           `FILE: ${filename} — RE-REVIEW ROUND ${round}`,
           `PURPOSE: ${fileDef?.purpose ?? ''}`,
           compilerBlock,
           '\nPREVIOUS ISSUES APPLIED (issue each a FIXED/NOT_FIXED verdict):',
           `[\n${prevBlock}\n]`,
           '\nCURRENT FILE (after patches — line numbers are display-only):\n' + numberedCode,
-          '\nSPECIFICATION:\n' + JSON.stringify(spec, null, 2),
         ].filter(Boolean).join('\n')
         const raw = await this.completeNonStreaming(REVIEW_AND_PATCH_REVERIFY_SYSTEM_PROMPT, userMsg)
         const { hunks, droppedCount, droppedReasons } = parseReReviewResponse(raw, previousHunkRecords, code, round)
@@ -1146,7 +1175,7 @@ export abstract class BaseAdapter implements ModelAdapter {
     originalCode: string,
     hunks:        ResolvedHunk[],
     onToken:      (token: string) => void,
-  ): Promise<{ code: string; tokensOut: number }> {
+  ): Promise<{ code: string; tokensIn: number; tokensOut: number; cacheReadTokens: number; cacheWriteTokens: number }> {
     const sortedHunks = [...hunks].sort((a, b) => b.line_start - a.line_start)
     const userMsg = [
       'Apply these exact patches to the file.',
@@ -1163,11 +1192,12 @@ export abstract class BaseAdapter implements ModelAdapter {
     ].join('\n')
 
     let code = ''
+    let usage: StreamUsage = { tokensIn: 0, tokensOut: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
     try {
       await withRetry(
         async () => {
           code = ''
-          await this.stream(APPLY_PATCH_SYSTEM_PROMPT, userMsg, (token) => {
+          usage = await this.stream(APPLY_PATCH_SYSTEM_PROMPT, userMsg, (token) => {
             code += token
             onToken(token)
           })
@@ -1178,7 +1208,13 @@ export abstract class BaseAdapter implements ModelAdapter {
       throw this.wrapPhaseError(err, `applyPatch:${filename}`)
     }
     const clean = code.replace(/^```[^\n]*\n([\s\S]*?)```\s*$/m, '$1').trim()
-    return { code: clean, tokensOut: estimateTokens(clean) }
+    return {
+      code:             clean,
+      tokensIn:         usage.tokensIn,
+      tokensOut:        usage.tokensOut || estimateTokens(clean),
+      cacheReadTokens:  usage.cacheReadTokens,
+      cacheWriteTokens: usage.cacheWriteTokens,
+    }
   }
 
   // ─── Output gate: ad-hoc human-requested fix ───────────────────────────────
@@ -1188,7 +1224,7 @@ export abstract class BaseAdapter implements ModelAdapter {
     code:        string,
     instruction: string,
     onToken:     (token: string) => void,
-  ): Promise<{ code: string; tokensOut: number }> {
+  ): Promise<{ code: string; tokensIn: number; tokensOut: number; cacheReadTokens: number; cacheWriteTokens: number }> {
     const userMsg = [
       `FILE (${filename}):`,
       code,
@@ -1197,11 +1233,12 @@ export abstract class BaseAdapter implements ModelAdapter {
     ].join('\n')
 
     let updated = ''
+    let usage: StreamUsage = { tokensIn: 0, tokensOut: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
     try {
       await withRetry(
         async () => {
           updated = ''
-          await this.stream(FIX_FILE_SYSTEM_PROMPT, userMsg, (token) => {
+          usage = await this.stream(FIX_FILE_SYSTEM_PROMPT, userMsg, (token) => {
             updated += token
             onToken(token)
           })
@@ -1212,7 +1249,13 @@ export abstract class BaseAdapter implements ModelAdapter {
       throw this.wrapPhaseError(err, `fixFile:${filename}`)
     }
     const clean = updated.replace(/^```[^\n]*\n([\s\S]*?)```\s*$/m, '$1').trim()
-    return { code: clean, tokensOut: estimateTokens(clean) }
+    return {
+      code:             clean,
+      tokensIn:         usage.tokensIn,
+      tokensOut:        usage.tokensOut || estimateTokens(clean),
+      cacheReadTokens:  usage.cacheReadTokens,
+      cacheWriteTokens: usage.cacheWriteTokens,
+    }
   }
 }
 

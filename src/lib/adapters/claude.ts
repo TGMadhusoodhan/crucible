@@ -4,6 +4,7 @@ import type {
   Provider,
   ThinkingOutput,
 } from '@/types'
+import type { StreamUsage } from './base'
 import {
   ALIGNMENT_SYSTEM_PROMPT,
   THINKING_SYSTEM_PROMPT,
@@ -136,7 +137,8 @@ export class ClaudeAdapter extends BaseAdapter {
         const res = await this.client.messages.create({
           model:      this.modelId,
           max_tokens: 8192,
-          system:     systemPrompt,
+          // Cache the system prompt — same prompt used repeatedly for review/spec calls.
+          system:     [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
           messages:   [{ role: 'user', content: userMsg }],
         })
         const block = res.content[0]
@@ -149,19 +151,35 @@ export class ClaudeAdapter extends BaseAdapter {
 
   // stream() is a one-shot primitive — retry is handled at the generate()/applyPatch()/
   // fixFile() level in BaseAdapter so the token accumulator can be reset on each attempt.
-  protected async stream(systemPrompt: string, userMsg: string, onToken: (token: string) => void): Promise<void> {
+  protected async stream(systemPrompt: string, userMsg: string, onToken: (token: string) => void): Promise<StreamUsage> {
     try {
+      let tokensIn         = 0
+      let tokensOut        = 0
+      let cacheReadTokens  = 0
+      let cacheWriteTokens = 0
+
       const s = this.client.messages.stream({
         model:      this.modelId,
         max_tokens: 32768,
-        system:     systemPrompt,
+        // Cache the generation system prompt — it's identical for every file in the session.
+        system:     [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
         messages:   [{ role: 'user', content: userMsg }],
       })
       for await (const event of s) {
         if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
           onToken(event.delta.text)
         }
+        if (event.type === 'message_start') {
+          const u = event.message.usage
+          tokensIn         = u.input_tokens
+          cacheReadTokens  = u.cache_read_input_tokens  ?? 0
+          cacheWriteTokens = u.cache_creation_input_tokens ?? 0
+        }
+        if (event.type === 'message_delta') {
+          tokensOut = event.usage.output_tokens
+        }
       }
+      return { tokensIn, tokensOut, cacheReadTokens, cacheWriteTokens }
     } catch (err) {
       throw wrapErr(err, 'stream', this.modelId)
     }

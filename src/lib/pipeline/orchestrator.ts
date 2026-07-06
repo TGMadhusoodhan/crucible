@@ -2,6 +2,7 @@ import fs   from 'fs'
 import path from 'path'
 import { eq } from 'drizzle-orm'
 import { getAdapter } from '@/lib/adapters'
+import { MODEL_PRICING } from '@/lib/adapters/base'
 import { getBudgetStatus, recordUsage } from '@/lib/budget'
 import { decrypt } from '@/lib/crypto'
 import { db, schema } from '@/lib/db'
@@ -546,15 +547,31 @@ function makeEmit(
 // ─── Budget recording (fully fire-and-forget) ────────────────────────────────
 
 function recordAndRefreshBudget(
-  state:    PipelineSessionState,
-  provider: Provider,
-  modelId:  string,
-  tokensIn: number,
-  tokensOut:number,
-  emit:     (event: SSEEvent) => void,
+  state:             PipelineSessionState,
+  provider:          Provider,
+  modelId:           string,
+  tokensIn:          number,
+  tokensOut:         number,
+  emit:              (event: SSEEvent) => void,
+  cacheReadTokens?:  number,
+  cacheWriteTokens?: number,
 ): void {
-  recordUsage(state.userId, state.sessionId, provider, modelId, tokensIn, tokensOut)
+  recordUsage(state.userId, state.sessionId, provider, modelId, tokensIn, tokensOut, cacheReadTokens, cacheWriteTokens)
     .catch(err => console.error('[budget] recordUsage failed:', err))
+
+  // Emit live cost + cache efficiency metrics to the UI.
+  const pricing = MODEL_PRICING[modelId]
+  if (pricing) {
+    const cr = cacheReadTokens  ?? 0
+    const cw = cacheWriteTokens ?? 0
+    const uncached = Math.max(0, tokensIn - cr - cw)
+    const costUsd =
+      uncached     / 1_000_000 * pricing.input +
+      cr           / 1_000_000 * (pricing.cacheRead  ?? pricing.input  * 0.1) +
+      cw           / 1_000_000 * (pricing.cacheWrite ?? pricing.input  * 1.25) +
+      tokensOut    / 1_000_000 * pricing.output
+    emit({ type: 'usage_update', provider, modelId, tokensIn, tokensOut, cacheReadTokens: cr, cacheWriteTokens: cw, costUsd })
+  }
 
   getBudgetStatus(state.userId, state.sessionId)
     .then(budget => {
@@ -849,8 +866,12 @@ export async function runPipeline(
         projectId, sessionId, state.taskDescription,
         state.questions!, state.answers!, r1Adapter, r2Adapter, emit, state.contextText,
       )
-      state.spec         = spec
-      state.fileManifest = manifest
+      state.spec          = spec
+      state.fileManifest  = manifest
+      // Serialize once here — JSON.stringify on the same immutable spec object is
+      // deterministic, but caching the string in state makes that guarantee explicit
+      // and avoids any risk of key-order changes if the object is ever touched.
+      state.specTextCache = JSON.stringify(spec, null, 2)
       dbg.phase2('spec + manifest ready — waiting for human confirmation', {
         criteria: spec.acceptance_criteria.length,
         edgeCases: spec.edge_cases.length,
@@ -911,14 +932,19 @@ export async function runPipeline(
 
     if (state.phase === 'phase3_generating') {
       try {
-        const code = await runPhase3Generate(
+        const genResult = await runPhase3Generate(
           projectId, sessionId, filename, state.currentFileIdx,
           totalFiles, state.fileManifest!, state.spec!, coderAdapter,
           state.acceptedFiles, emit, state.contextText,
           // regenHint was captured before resetPerFileState cleared r1Hunks/compilerErrors
           state.regenAttempted ? state.regenHint : undefined,
         )
-        state.currentFileCode = code
+        state.currentFileCode = genResult.code
+        recordAndRefreshBudget(
+          state, config.coderProvider, config.coderModelId,
+          genResult.tokensIn, genResult.tokensOut, emit,
+          genResult.cacheReadTokens, genResult.cacheWriteTokens,
+        )
         state = await transition(state, 'phase3_reviewing')
       } catch (err) {
         await handleError(state, err, emit)
