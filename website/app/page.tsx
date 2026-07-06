@@ -317,11 +317,51 @@ function Install() {
           />
         </div>
 
-        <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4 space-y-1">
-          <p className="text-xs font-semibold text-zinc-400">You will need at least one AI API key</p>
-          <p className="text-xs text-zinc-600 leading-relaxed">
-            Supported: Anthropic, OpenAI, DeepSeek, Google, Mistral, Groq, Together AI, OpenRouter.
-            DeepSeek + Claude Sonnet is the recommended default — highest coding score at the lowest cost.
+        <div className="rounded-lg border border-amber-900/40 bg-amber-950/10 p-4 space-y-3">
+          <p className="text-xs font-semibold text-amber-400">You need exactly 2 API keys before you start</p>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">Coder (required)</p>
+              <p className="text-xs font-medium text-zinc-300">DeepSeek V4 Pro</p>
+              <p className="text-[10px] text-zinc-600 leading-relaxed">Writes all the code. Best coding score at the lowest cost.</p>
+              <a
+                href="https://platform.deepseek.com/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center rounded border border-zinc-700 px-2.5 py-1 text-[10px] text-zinc-300 transition-colors hover:border-indigo-600 hover:text-indigo-300"
+              >
+                Get DeepSeek key →
+              </a>
+            </div>
+
+            <div className="space-y-1.5">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">Reviewer (required)</p>
+              <p className="text-xs font-medium text-zinc-300">Claude Sonnet or GPT-4o</p>
+              <p className="text-[10px] text-zinc-600 leading-relaxed">Reviews the code. Different AI family = real cross-check.</p>
+              <div className="flex flex-wrap gap-1.5">
+                <a
+                  href="https://console.anthropic.com/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center rounded border border-zinc-700 px-2.5 py-1 text-[10px] text-zinc-300 transition-colors hover:border-indigo-600 hover:text-indigo-300"
+                >
+                  Get Claude key →
+                </a>
+                <a
+                  href="https://platform.openai.com/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center rounded border border-zinc-700 px-2.5 py-1 text-[10px] text-zinc-300 transition-colors hover:border-indigo-600 hover:text-indigo-300"
+                >
+                  Get GPT-4o key →
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <p className="text-[10px] text-zinc-700 border-t border-zinc-800 pt-2">
+            Add both in Settings after Crucible starts. Other providers also work: Google, Mistral, Groq, Together AI, OpenRouter.
           </p>
         </div>
       </div>
