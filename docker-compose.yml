@@ -1,8 +1,6 @@
-version: '3.8'
-
 services:
   crucible:
-    build: .
+    image: tgmadhusoodhan/crucible:latest
     container_name: crucible
     ports:
       - "3000:3000"
