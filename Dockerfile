@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt
 
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+RUN npm install --prefer-offline
 
 # ─── Stage 2: Build the Next.js app ───────────────────────────────────────────
 FROM node:20-slim AS builder
