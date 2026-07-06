@@ -1,28 +1,22 @@
 # Current Build Step
-Step: PROMPT 7 — Workspace mode
+Step: PROMPT 8 — Workspace memory
 Status: COMPLETE
 Started: 2026-07-06
 Last Updated: 2026-07-06
 
 ## What Is Done In This Step
 
-- `drizzle/0002_workspace_dir.sql` — ALTER TABLE adds `workspace_dir TEXT` (nullable) to projects
-- `drizzle/meta/_journal.json` — migration entry added; auto-migrates on next server start
-- `src/lib/db/schema.ts` — `workspaceDir` text column added to projects table
-- `src/lib/workspace/paths.ts` — `resolveInWorkspace(workspaceDir, relPath)` rejects null bytes and path traversal (both `..` and absolute paths); every write/read goes through it
-- `src/lib/workspace/index.ts` — `prepareWorkspaceForSession`, `writeAcceptedFile`, `readWorkspaceFile`, `listWorkspaceFiles`, `getFileCommitHash`; git integration via execFile (no new deps); git failure is non-fatal (warns and continues)
-- `src/types/index.ts` — `workspaceDir?: string | null` added to `PipelineSessionState`
-- `src/lib/pipeline/orchestrator.ts` — `StartPipelineParams.workspaceDir`; `createSession` stores it in state; `acceptCurrentFile` calls `writeAcceptedFile` if workspace set; `applyOutputFix` writes to workspace too
-- `src/app/api/pipeline/start/route.ts` — loads `workspaceDir` from DB; calls `prepareWorkspaceForSession` before session; passes to `createSession`
-- `src/app/api/projects/route.ts` — POST accepts optional `workspaceDir`
-- `src/app/api/files/[projectId]/route.ts` — returns `workspaceDir` + per-file `inWorkspace: boolean`
-- `src/app/api/files/[projectId]/[...filepath]/route.ts` — GET returns `commitHash` + `workspacePath`
-- `src/components/files/FilesSection.tsx` — workspace dir shown in tree header; per-file ✓ badge when written to workspace; file header shows real absolute path + commit hash
-- tsc: 0 errors; 58/58 tests pass; committed `7b98c41`
+- `src/types/index.ts` — CrucibleDecision, RegistryEntry, HistoryEvent, ProjectContext types; mode/projectName on PipelineSessionState
+- `src/lib/workspace/memory.ts` — complete memory module managing .crucible/{project.json, registry.json, history.jsonl} and CRUCIBLE.md; drift detection in loadProjectContext; heuristic export scanner; git commit helper for .crucible/ files
+- `src/app/api/projects/[id]/context/route.ts` — GET endpoint for project context
+- `src/lib/pipeline/orchestrator.ts` — CRUCIBLE.md injected into contextText for continue sessions; registry preload + skip-generation guard; history events at 6 lifecycle points; workspace writes also in arbitration resolution paths
+- `src/app/api/pipeline/start/route.ts` — loads project name + context; passes to createSession
+- `src/app/(dashboard)/projects/page.tsx` — project list + context panel with overview/decisions/files tabs, drifted-files notice
+- tsc: 0 errors; 58/58 tests pass; committed d60ef4d
 
 ## What Remains In This Step
 
-- UI for picking/linking workspace during project creation (no spec'd yet — deferred)
+- Nothing
 
 ## Blockers
 
@@ -30,4 +24,4 @@ Last Updated: 2026-07-06
 
 ## Next
 
-- PROMPT 8 (TBD)
+- PROMPT 9 (TBD — likely AST-based export indexer to replace heuristic extractExports)

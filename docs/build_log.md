@@ -4,6 +4,28 @@ Append-only. Never overwrite. Each session adds a new entry.
 
 ---
 
+## Session 2026-07-06 17:00
+### Completed
+- PROMPT 8: Workspace memory — .crucible/ state + CRUCIBLE.md + session continuity
+### Files Created
+- `src/lib/workspace/memory.ts` — full memory module: readProjectJson, updateProjectSpec, addDecision, readRegistry, updateRegistryEntry, appendHistory, hashContent, extractExports, updateCrucibleMd, loadProjectContext, commitCrucibleFiles
+- `src/app/api/projects/[id]/context/route.ts` — GET endpoint returning ProjectContext
+### Files Modified
+- `src/types/index.ts` — added CrucibleDecision, RegistryEntry, HistoryEvent, ProjectContext; added mode/projectName to PipelineSessionState
+- `src/lib/pipeline/orchestrator.ts` — CRUCIBLE.md injected as contextText preamble for continue sessions; registry files preloaded into acceptedFiles; skip-generation guard for preloaded files; history events at confirmSpec/acceptCurrentFile/resolveArbitration/acceptOutputFile; registry+CRUCIBLE.md updated on file accept; git commits .crucible/ at logical milestones; arbitration also writes files to workspace
+- `src/app/api/pipeline/start/route.ts` — fetches project name; calls loadProjectContext; passes context+name to createSession
+- `src/app/(dashboard)/projects/page.tsx` — full project context UI: list, tabs (overview/decisions/files), CRUCIBLE.md renderer, drifted-files notice
+### Decisions Made
+- history.jsonl is append-only (no git commit per event); git commits batch at spec_confirmed, file_accepted, session_completed
+- Preloaded registry files use carry-forward path (lighter than acceptCurrentFile) — no redundant workspace writes or history entries
+- extractExports is string-based heuristic regex scanner (no AST) until P9 indexer exists
+- CRUCIBLE.md uses <!-- crucible:section:start/end --> markers; content outside markers is user-editable and never touched
+- projectContext stripped from persisted SQLite state (not needed after context injection into contextText)
+### Left Off At
+- tsc clean, 58/58 tests. Committed d60ef4d on main. Ready for PROMPT 9.
+
+---
+
 ## Session 2026-07-06 16:00
 ### Completed
 - PROMPT 6: Native npm distribution — `crucible` CLI launcher, first-run setup, CRUCIBLE_HOME, auto key generation
