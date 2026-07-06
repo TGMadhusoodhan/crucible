@@ -1,6 +1,6 @@
 import fs   from 'fs'
 import path from 'path'
-import { eq, lt } from 'drizzle-orm'
+import { eq } from 'drizzle-orm'
 import { getAdapter } from '@/lib/adapters'
 import { getBudgetStatus, recordUsage } from '@/lib/budget'
 import { decrypt } from '@/lib/crypto'
@@ -113,10 +113,17 @@ async function persistSessionToDb(state: PipelineSessionState): Promise<void> {
     })
 }
 
+// Guard against scheduling multiple delete timers for the same session if
+// saveSessionState is called more than once in a terminal phase.
+const cleanupScheduled = new Set<string>()
+
 // Schedule 24-hour SQLite cleanup for terminal states (output lives on filesystem).
 // If the server restarts before the timer fires, the 7-day startup purge in db/index.ts catches it.
 function scheduleDbCleanup(sessionId: string): void {
+  if (cleanupScheduled.has(sessionId)) return
+  cleanupScheduled.add(sessionId)
   setTimeout(() => {
+    cleanupScheduled.delete(sessionId)
     db.delete(schema.pipelineSessions)
       .where(eq(schema.pipelineSessions.sessionId, sessionId))
       .catch(() => {})

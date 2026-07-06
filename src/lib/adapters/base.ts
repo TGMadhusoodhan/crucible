@@ -884,9 +884,11 @@ export async function withRetry<T>(
       lastErr = err
       if (attempt === RETRY_DELAYS_MS.length) break
       if (classifyError(err) !== 'retryable') throw err  // fail fast on 4xx / unknown
-      const jitter  = Math.floor(Math.random() * 500)
-      const retryMs = getRetryAfterMs(err) ?? RETRY_DELAYS_MS[attempt]!
-      const delayMs = retryMs + jitter
+      const retryAfter = getRetryAfterMs(err)
+      // Jitter only for the base backoff — Retry-After is a server-mandated wait, don't add to it
+      const delayMs = retryAfter != null
+        ? retryAfter
+        : RETRY_DELAYS_MS[attempt]! + Math.floor(Math.random() * 500)
       onRetry?.(attempt + 1, delayMs)
       await new Promise<void>(r => setTimeout(r, delayMs))
     }
