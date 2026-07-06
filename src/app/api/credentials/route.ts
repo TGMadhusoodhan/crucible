@@ -7,7 +7,7 @@ import { generateId } from '@/lib/utils'
 import { captureApiError } from '@/lib/sentry'
 import type { ApiResponse, Provider } from '@/types'
 
-const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together'] as const
+const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together', 'zai'] as const
 
 const postSchema = z.object({
   provider: z.enum(PROVIDERS),
@@ -24,6 +24,7 @@ async function validateApiKey(provider: Provider, apiKey: string): Promise<{ val
     openrouter: { url: 'https://openrouter.ai/api/v1/models',                      headers: { Authorization: `Bearer ${apiKey}` } },
     groq:       { url: 'https://api.groq.com/openai/v1/models',                    headers: { Authorization: `Bearer ${apiKey}` } },
     together:   { url: 'https://api.together.xyz/v1/models',                       headers: { Authorization: `Bearer ${apiKey}` } },
+    zai:        { url: 'https://api.z.ai/api/paas/v4/models',                      headers: { Authorization: `Bearer ${apiKey}` } },
   }
   const { url, headers } = configs[provider]
   try {

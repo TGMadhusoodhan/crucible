@@ -42,10 +42,13 @@ export function AppNav() {
   const projectName = project?.name
 
   return (
-    <header className="flex h-12 shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4">
+    <header className="relative flex h-12 shrink-0 items-center justify-between bg-zinc-950 px-4">
       {/* Brand */}
       <Link href="/dashboard" className="flex shrink-0 items-center gap-2.5">
-        <span className="h-4 w-0.5 rounded-full bg-indigo-500" />
+        <div className="flex flex-col gap-0.5">
+          <span className="h-1.5 w-0.5 rounded-full bg-coder-400" />
+          <span className="h-1.5 w-0.5 rounded-full bg-reviewer-600" />
+        </div>
         <span className="font-mono text-sm font-semibold tracking-tight text-zinc-100">Crucible</span>
         <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500">beta</span>
       </Link>
@@ -80,6 +83,10 @@ export function AppNav() {
         </NavLink>
         <span className="rounded border border-zinc-800 px-2 py-0.5 font-mono text-[10px] text-zinc-600">local</span>
       </nav>
+      <div
+        className="absolute bottom-0 left-0 right-0 h-px pointer-events-none"
+        style={{ background: 'linear-gradient(to right, rgba(212,136,40,0.45), rgba(74,120,152,0.3) 55%, rgba(46,39,32,0.8))' }}
+      />
     </header>
   )
 }

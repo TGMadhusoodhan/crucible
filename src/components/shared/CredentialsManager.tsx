@@ -4,7 +4,11 @@ import { useCallback, useEffect, useState } from 'react'
 import { cn } from '@/lib/utils'
 import type { Provider } from '@/types'
 
-const PROVIDERS: Provider[] = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together']
+const PROVIDERS: Provider[] = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together', 'zai']
+
+// Providers hidden from the "add key" UI — adapters still work, existing
+// stored credentials still display so users can remove them if needed.
+const HIDDEN_PROVIDERS = new Set<Provider>(['mistral', 'openrouter', 'together'])
 
 const PROVIDER_LABELS: Record<Provider, string> = {
   anthropic:  'Anthropic (Claude)',
@@ -15,6 +19,7 @@ const PROVIDER_LABELS: Record<Provider, string> = {
   openrouter: 'OpenRouter (any model)',
   groq:       'Groq',
   together:   'Together AI',
+  zai:        'Z.ai (GLM)',
 }
 
 const PROVIDER_KEY_HINT: Partial<Record<Provider, string>> = {
@@ -23,6 +28,7 @@ const PROVIDER_KEY_HINT: Partial<Record<Provider, string>> = {
   deepseek:   'sk-…',
   google:     'AIza…',
   openrouter: 'sk-or-…',
+  zai:        'your-api-key',
 }
 
 interface Credential { id: string; provider: string; isValid: boolean; createdAt: number }
@@ -159,7 +165,7 @@ export function CredentialsManager() {
         <p className="text-sm text-zinc-600">Loading…</p>
       ) : (
         <div className="space-y-2">
-          {PROVIDERS.map((provider) => {
+          {PROVIDERS.filter((provider) => !HIDDEN_PROVIDERS.has(provider) || connectedMap.has(provider)).map((provider) => {
             const cred = connectedMap.get(provider)
             return (
               <div

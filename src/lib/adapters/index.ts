@@ -5,6 +5,7 @@ import { MistralAdapter } from './mistral'
 import { OpenAIAdapter } from './openai'
 import { OpenAICompatibleAdapter } from './openai-compatible'
 import { OpenRouterAdapter } from './openrouter'
+import { ZAIAdapter } from './zai'
 import type { ModelAdapter, Provider } from '@/types'
 
 class GroqAdapter extends OpenAICompatibleAdapter {
@@ -32,6 +33,7 @@ export function getAdapter(provider: Provider, modelId: string, apiKey: string):
     case 'openrouter':  return new OpenRouterAdapter(modelId, apiKey)
     case 'groq':        return new GroqAdapter(modelId, apiKey)
     case 'together':    return new TogetherAdapter(modelId, apiKey)
+    case 'zai':         return new ZAIAdapter(modelId, apiKey)
     default: {
       const _exhaustive: never = provider
       throw new Error(`Unknown provider: ${String(_exhaustive)}`)
@@ -46,5 +48,6 @@ export {
   MistralAdapter,
   OpenAIAdapter,
   OpenRouterAdapter,
+  ZAIAdapter,
 }
 export type { ModelAdapter }

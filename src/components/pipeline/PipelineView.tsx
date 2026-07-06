@@ -51,28 +51,43 @@ function ProgressStrip() {
   const isGate = phase === 'phase3_micro_gate' || phase === 'phase3_arbitration'
 
   return (
-    <div className="flex items-center gap-0 border-b border-zinc-800 px-6 py-2 bg-zinc-950/60">
-      {PHASES.map((step, i) => {
-        const done   = i < currentIdx
-        const active = i === currentIdx
-        const gate   = isGate && step.label === 'Review'
-        return (
-          <div key={step.label} className="flex items-center">
-            <span className={cn(
-              'text-[10px] px-2 py-0.5 rounded-full transition-colors',
-              gate               ? 'bg-amber-950/60 text-amber-400' :
-              done               ? 'text-green-500' :
-              active             ? 'bg-indigo-950/60 text-indigo-300' :
-                                   'text-zinc-700',
-            )}>
-              {done ? '✓ ' : ''}{step.label}
-            </span>
-            {i < PHASES.length - 1 && (
-              <span className="text-zinc-800 px-1">→</span>
-            )}
-          </div>
-        )
-      })}
+    <div className="border-b border-zinc-800 bg-zinc-950/60 px-6 py-3">
+      <div className="relative flex justify-between items-start">
+        <div className="absolute inset-x-0 top-[3px] h-px bg-zinc-800 pointer-events-none" />
+        {PHASES.map((step, i) => {
+          const done   = i < currentIdx
+          const active = i === currentIdx
+          const gate   = active && isGate
+          return (
+            <div key={step.label} className="relative z-10 flex flex-col items-center gap-1.5">
+              <div
+                className={cn(
+                  'h-1.5 w-1.5 rounded-full transition-all duration-300',
+                  gate   ? 'bg-amber-400' :
+                  done   ? 'bg-zinc-600' :
+                  active ? 'bg-coder-400' :
+                           'bg-zinc-800',
+                )}
+                style={
+                  active && !gate ? { boxShadow: '0 0 6px rgba(212,136,40,0.65)', outline: '2px solid rgba(212,136,40,0.12)', outlineOffset: '2px' } :
+                  gate            ? { boxShadow: '0 0 6px rgba(251,191,36,0.7)' } :
+                  !done           ? { outline: '1px solid #2E2720' } :
+                                    {}
+                }
+              />
+              <span className={cn(
+                'text-[9px] whitespace-nowrap leading-none',
+                gate   ? 'text-amber-400' :
+                done   ? 'text-zinc-700' :
+                active ? 'text-zinc-400' :
+                         'text-zinc-800',
+              )}>
+                {step.label}
+              </span>
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }

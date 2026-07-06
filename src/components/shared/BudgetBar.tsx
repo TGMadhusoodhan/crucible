@@ -17,6 +17,7 @@ const PROVIDER_LABELS: Record<Provider, string> = {
   openrouter: 'OpenRouter',
   groq:       'Groq',
   together:   'Together',
+  zai:        'Z.ai',
 }
 
 const ALL_PROVIDERS: Provider[] = [

@@ -7,7 +7,9 @@ import { usePipeline } from '@/hooks/usePipeline'
 import { cn } from '@/lib/utils'
 import type { ConsensusOutput, Provider, SpecDocument } from '@/types'
 
-const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together'] as const
+const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together', 'zai'] as const
+
+const HIDDEN_PROVIDERS = new Set<Provider>(['mistral', 'openrouter', 'together'])
 
 // ─── Model catalogue ──────────────────────────────────────────────────────────
 
@@ -66,6 +68,11 @@ const PROVIDER_MODELS: Record<Provider, ModelOption[]> = {
     { id: 'meta-llama/Llama-3.1-70B-Instruct',    label: 'Llama 3.1 70B' },
     { id: 'mistralai/Mixtral-8x7B-Instruct-v0.1', label: 'Mixtral 8x7B' },
     { id: 'Qwen/Qwen2.5-Coder-32B-Instruct',      label: 'Qwen 2.5 Coder 32B', note: 'coding' },
+  ],
+  zai: [
+    { id: 'glm-5.2',       label: 'GLM-5.2',        recommended: true, note: 'flagship' },
+    { id: 'glm-5-turbo',   label: 'GLM-5 Turbo',    note: 'fast' },
+    { id: 'glm-4.7-flash', label: 'GLM-4.7 Flash',  note: 'free tier' },
   ],
 }
 
@@ -177,8 +184,10 @@ export function ProjectNavigator() {
           <div
             key={p.id}
             className={cn(
-              'group flex items-center gap-1 rounded transition-colors',
-              p.id === project?.id ? 'bg-zinc-800' : 'hover:bg-zinc-800/50',
+              'group flex items-center gap-1 rounded-r transition-colors border-l-2',
+              p.id === project?.id
+                ? 'bg-zinc-800/70 border-coder-600'
+                : 'hover:bg-zinc-800/40 border-transparent',
             )}
           >
             <button
@@ -304,61 +313,70 @@ function NewProjectModal({ onClose, onCreated }: { onClose: () => void; onCreate
           </Field>
 
           {/* Coder — fixed to DeepSeek */}
-          <div className="rounded-lg border border-zinc-800 p-3 space-y-2">
-            <div className="flex items-center justify-between">
-              <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
-                DeepSeek — code generator
+          <div className="rounded-lg border border-zinc-800 overflow-hidden flex">
+            <div className="w-0.5 shrink-0 bg-coder-600" />
+            <div className="flex-1 p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
+                  DeepSeek — code generator
+                </p>
+                <KeyBadge provider={CODER_PROVIDER} credMap={credMap} />
+              </div>
+              <p className="text-[10px] text-zinc-600">
+                Fixed to {CODER_MODEL_ID}. Used for all code generation and patch application.
               </p>
-              <KeyBadge provider={CODER_PROVIDER} credMap={credMap} />
             </div>
-            <p className="text-[10px] text-zinc-600">
-              Fixed to {CODER_MODEL_ID}. Used for all code generation and patch application.
-            </p>
           </div>
 
           {/* Reviewer 1 */}
-          <div className="rounded-lg border border-zinc-800 p-3 space-y-3">
-            <div className="flex items-center justify-between">
-              <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
-                Reviewer 1
-              </p>
-              <KeyBadge provider={form.r1Provider} credMap={credMap} />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Provider">
-                <ProviderSelect value={form.r1Provider} onChange={setR1Provider} />
-              </Field>
-              <Field label="Model">
-                <ModelSelect
-                  provider={form.r1Provider}
-                  value={form.r1ModelId}
-                  onChange={(id) => setForm({ ...form, r1ModelId: id })}
-                />
-              </Field>
+          <div className="rounded-lg border border-zinc-800 overflow-hidden flex">
+            <div className="w-0.5 shrink-0 bg-reviewer-600" />
+            <div className="flex-1 p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
+                  Reviewer 1
+                </p>
+                <KeyBadge provider={form.r1Provider} credMap={credMap} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Provider">
+                  <ProviderSelect value={form.r1Provider} onChange={setR1Provider} />
+                </Field>
+                <Field label="Model">
+                  <ModelSelect
+                    provider={form.r1Provider}
+                    value={form.r1ModelId}
+                    onChange={(id) => setForm({ ...form, r1ModelId: id })}
+                  />
+                </Field>
+              </div>
             </div>
           </div>
 
           {/* Reviewer 2 */}
-          <div className="rounded-lg border border-zinc-800 p-3 space-y-3">
-            <div className="flex items-center justify-between">
-              <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
-                Reviewer 2
-              </p>
-              <KeyBadge provider={form.r2Provider} credMap={credMap} />
+          <div className="rounded-lg border border-zinc-800 overflow-hidden flex">
+            <div className="w-0.5 shrink-0 bg-reviewer-400" />
+            <div className="flex-1 p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
+                  Reviewer 2
+                </p>
+                <KeyBadge provider={form.r2Provider} credMap={credMap} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Provider">
+                  <ProviderSelect value={form.r2Provider} onChange={setR2Provider} />
+                </Field>
+                <Field label="Model">
+                  <ModelSelect
+                    provider={form.r2Provider}
+                    value={form.r2ModelId}
+                    onChange={(id) => setForm({ ...form, r2ModelId: id })}
+                  />
+                </Field>
+              </div>
+              <p className="text-[10px] text-zinc-600">Must be a different provider from Reviewer 1</p>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Provider">
-                <ProviderSelect value={form.r2Provider} onChange={setR2Provider} />
-              </Field>
-              <Field label="Model">
-                <ModelSelect
-                  provider={form.r2Provider}
-                  value={form.r2ModelId}
-                  onChange={(id) => setForm({ ...form, r2ModelId: id })}
-                />
-              </Field>
-            </div>
-            <p className="text-[10px] text-zinc-600">Must be a different provider from Reviewer 1</p>
           </div>
 
           {error && <p className="text-xs text-red-400">{error}</p>}
@@ -427,7 +445,7 @@ function ProviderSelect({ value, onChange }: { value: Provider; onChange: (v: Pr
       value={value}
       onChange={(e) => onChange(e.target.value as Provider)}
     >
-      {PROVIDERS.map((p) => (
+      {PROVIDERS.filter(p => !HIDDEN_PROVIDERS.has(p)).map((p) => (
         <option key={p} value={p}>{p}</option>
       ))}
     </select>

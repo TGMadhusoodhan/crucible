@@ -5,7 +5,7 @@ import { applyCapToBudget, cn } from '@/lib/utils'
 import type { BudgetStatus, Provider, ProviderBudget } from '@/types'
 
 const ALL_PROVIDERS: Provider[] = [
-  'anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together',
+  'anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together', 'zai',
 ]
 
 const PROVIDER_LABELS: Record<Provider, string> = {
@@ -17,6 +17,7 @@ const PROVIDER_LABELS: Record<Provider, string> = {
   openrouter: 'OpenRouter',
   groq:       'Groq',
   together:   'Together AI',
+  zai:        'Z.ai (GLM)',
 }
 
 function usageColor(percentUsed: number) {

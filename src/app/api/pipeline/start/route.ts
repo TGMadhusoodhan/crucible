@@ -7,7 +7,7 @@ import { createSession } from '@/lib/pipeline/orchestrator'
 import { captureApiError } from '@/lib/sentry'
 import type { ApiResponse, Provider } from '@/types'
 
-const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together'] as const
+const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together', 'zai'] as const
 
 const startSchema = z.object({
   projectId:       z.string().min(1),

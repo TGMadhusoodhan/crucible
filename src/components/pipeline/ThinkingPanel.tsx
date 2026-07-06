@@ -29,7 +29,7 @@ function ModelCard({
   const [showAssumptions, setShowAssumptions] = useState(false)
   const [expanded, setExpanded]               = useState(!compact)
 
-  const railCls = role === 'r1' ? 'bg-indigo-600/70' : 'bg-purple-600/60'
+  const railCls = role === 'r1' ? 'bg-reviewer-600' : 'bg-reviewer-400'
 
   return (
     <div className={cn(
@@ -52,7 +52,8 @@ function ModelCard({
           {compact && (
             <span className="text-[10px] text-zinc-600">{expanded ? '▾' : '▸'}</span>
           )}
-          <span className="text-xs font-semibold text-zinc-300 truncate">{label}</span>
+          <span className="text-xs font-semibold text-zinc-300 truncate flex-1 min-w-0">{label}</span>
+          <span className="shrink-0 font-mono text-[9px] text-reviewer-600 uppercase tracking-widest">{role === 'r1' ? 'r1' : 'r2'}</span>
           {!output && <PulsingDot />}
           {output && (
             <span className="rounded bg-green-900/40 px-1.5 py-0.5 text-[10px] text-green-400 shrink-0">

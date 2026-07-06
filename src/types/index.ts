@@ -4,7 +4,7 @@ import { z } from 'zod'
 
 export type Provider =
   | 'anthropic' | 'openai' | 'deepseek' | 'google'
-  | 'mistral'   | 'openrouter' | 'groq'  | 'together'
+  | 'mistral'   | 'openrouter' | 'groq'  | 'together' | 'zai'
 
 export type Plan = 'free' | 'indie' | 'pro' | 'team'
 

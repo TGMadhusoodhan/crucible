@@ -5,7 +5,7 @@ import { db, schema } from '@/lib/db'
 import { generateId } from '@/lib/utils'
 import type { ApiResponse } from '@/types'
 
-const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together'] as const
+const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together', 'zai'] as const
 
 const createSchema = z.object({
   name:        z.string().min(1).max(100),
