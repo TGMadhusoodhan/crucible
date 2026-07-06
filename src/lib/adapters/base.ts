@@ -380,11 +380,32 @@ export function parseJSON<T>(text: string, phase: string): T | null {
 
   const candidates: string[] = []
 
-  // 1. JSON inside a markdown fence — most reliable when model ignores "no fences" rule.
-  // Use greedy match ([\s\S]*) so code hunks containing backticks don't truncate the capture.
-  // Non-greedy would stop at the first ``` inside the JSON (e.g. python code in a hunk).
-  const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*)```/)
-  if (fenceMatch?.[1]) candidates.push(fenceMatch[1].trim())
+  // 1. Each individual fence block as its own candidate. Some models (e.g. GLM-5.2)
+  // split a response across two separate ```json blocks instead of one. Trying each
+  // block individually handles the common single-block case, and the merge step below
+  // handles the split case. The old greedy single-match (first...last ```) was wrong
+  // when multiple blocks were present — it captured everything in between as one blob.
+  const fenceBlocks = [...cleaned.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)]
+    .map(m => m[1]?.trim() ?? '')
+    .filter(Boolean)
+  for (const block of fenceBlocks) candidates.push(block)
+
+  // 1b. Merge all fence blocks into one object — handles models that output
+  // { "spec": {...} } and { "manifest": {...} } as two separate code blocks.
+  if (fenceBlocks.length > 1) {
+    const merged: Record<string, unknown> = {}
+    let anyParsed = false
+    for (const block of fenceBlocks) {
+      try {
+        const parsed = JSON.parse(block) as Record<string, unknown>
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          Object.assign(merged, parsed)
+          anyParsed = true
+        }
+      } catch { /* skip unparseable blocks */ }
+    }
+    if (anyParsed) candidates.push(JSON.stringify(merged))
+  }
 
   // 2. All syntactically valid JSON objects/arrays found via stack-based extraction
   for (const v of extractJsonValues(cleaned)) candidates.push(v)
