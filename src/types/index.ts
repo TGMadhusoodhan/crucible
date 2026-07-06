@@ -246,6 +246,18 @@ export const reviewHunkSchema = z.object({
 
 export const reviewHunksSchema = z.array(reviewHunkSchema).catch([])
 
+// ─── Re-review response — { verdicts, new_issues } ───────────────────────────
+// Used by parseWithRepair to validate the round > 1 re-review response structure.
+
+export const reReviewResponseSchema = z.object({
+  verdicts: z.array(z.object({
+    id:     z.string().catch(''),
+    status: z.enum(['FIXED', 'NOT_FIXED']),         // STRICT
+    hunk:   reviewHunkSchema.optional(),
+  })).catch([]),
+  new_issues: z.array(reviewHunkSchema).catch([]),
+})
+
 // ─── Previous Hunk Record — passed to re-review so models can issue verdicts ─
 
 export interface PreviousHunkRecord {

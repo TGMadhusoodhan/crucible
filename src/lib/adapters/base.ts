@@ -1,5 +1,7 @@
+import { z } from 'zod'
 import { generateId } from '@/lib/utils'
 import { estimateTokens } from '@/lib/utils/tokens'
+import { dbg } from '@/lib/debug'
 import type {
   AcceptanceCriterion,
   AlignmentMessage,
@@ -19,7 +21,8 @@ import type {
   SpecDocument,
   ThinkingOutput,
 } from '@/types'
-import { crossReviewResponseSchema, fileManifestSchema, reviewHunksSchema, thinkingOutputSchema } from '@/types'
+import { crossReviewResponseSchema, fileManifestSchema, reReviewResponseSchema, reviewHunksSchema, thinkingOutputSchema } from '@/types'
+import { alignmentOutputSchema, reviewHunksStrictSchema, specAndManifestOutputSchema } from '@/lib/schemas'
 
 // ─── Pricing table (per million tokens) ──────────────────────────────────────
 // cacheRead:  price for tokens that were read from the prompt cache (cache hit)
@@ -72,6 +75,51 @@ export function computeCostUsd(
     cacheWriteTokens / 1_000_000 * (pricing.cacheWrite ?? pricing.input  * 1.25) +
     tokensOut        / 1_000_000 * pricing.output
   )
+}
+
+// ─── One-shot JSON repair ─────────────────────────────────────────────────────
+// If extraction or schema validation fails, makes ONE follow-up call to the
+// same adapter. If the second attempt also fails, throws a phase-tagged error.
+// `repair` is a callback that receives the error description and returns the
+// model's response to the repair prompt — the caller owns the retry call so the
+// correct model/system-prompt combination is used.
+
+export async function parseWithRepair<T>(
+  raw:      string,
+  schema:   z.ZodSchema<T>,
+  repair:   (errorMsg: string) => Promise<string>,
+  phase:    string,
+  onRepair?: (reason: string) => void,
+): Promise<T> {
+  // Attempt 1: extract JSON and validate against the schema
+  const parsed1 = parseJSON<unknown>(raw, phase)
+  const result1 = schema.safeParse(parsed1)
+  if (result1.success) return result1.data
+
+  // Schema failed (or parseJSON returned null) — build a human-readable error
+  const errMsg = result1.error.issues
+    .map(i => `${i.path.join('.') || '(root)'}: ${i.message}`)
+    .join('; ')
+  onRepair?.(`${phase} — repair triggered: ${errMsg}`)
+  dbg.review('json-repair', { phase, model: '?', error: errMsg })
+
+  const repairPrompt = `Your previous response could not be parsed. Error: ${errMsg}\nRespond with ONLY the corrected JSON — no markdown fences, no prose.`
+  let repairRaw: string
+  try {
+    repairRaw = await repair(repairPrompt)
+  } catch (err) {
+    throw new Error(`[${phase}] repair call failed (${errMsg}): ${err instanceof Error ? err.message : String(err)}`)
+  }
+
+  // Attempt 2: validate repaired response
+  const parsed2 = parseJSON<unknown>(repairRaw, `${phase}:repair`)
+  const result2 = schema.safeParse(parsed2)
+  if (result2.success) return result2.data
+
+  const errMsg2 = result2.error.issues
+    .map(i => `${i.path.join('.') || '(root)'}: ${i.message}`)
+    .join('; ')
+  throw new Error(`[${phase}] JSON repair failed: ${errMsg2}`)
 }
 
 // ─── System prompts ───────────────────────────────────────────────────────────
@@ -468,18 +516,15 @@ export function parseJSON<T>(text: string, phase: string): T | null {
 
   const candidates: string[] = []
 
-  // 1. Each individual fence block as its own candidate. Some models (e.g. GLM-5.2)
-  // split a response across two separate ```json blocks instead of one. Trying each
-  // block individually handles the common single-block case, and the merge step below
-  // handles the split case. The old greedy single-match (first...last ```) was wrong
-  // when multiple blocks were present — it captured everything in between as one blob.
   const fenceBlocks = [...cleaned.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)]
     .map(m => m[1]?.trim() ?? '')
     .filter(Boolean)
-  for (const block of fenceBlocks) candidates.push(block)
 
-  // 1b. Merge all fence blocks into one object — handles models that output
-  // { "spec": {...} } and { "manifest": {...} } as two separate code blocks.
+  // 1a. When multiple fence blocks exist, try the merged object FIRST so that
+  // models which split a response across two blocks (e.g. GLM-5.2 outputs
+  // { "spec": {...} } and { "manifest": {...} } separately) produce the combined
+  // result rather than just the first block. For a single block the merge step
+  // is skipped and the block is tried directly (step 1b).
   if (fenceBlocks.length > 1) {
     const merged: Record<string, unknown> = {}
     let anyParsed = false
@@ -494,6 +539,9 @@ export function parseJSON<T>(text: string, phase: string): T | null {
     }
     if (anyParsed) candidates.push(JSON.stringify(merged))
   }
+
+  // 1b. Each individual fence block as a fallback candidate.
+  for (const block of fenceBlocks) candidates.push(block)
 
   // 2. All syntactically valid JSON objects/arrays found via stack-based extraction
   for (const v of extractJsonValues(cleaned)) candidates.push(v)
@@ -548,44 +596,27 @@ export function parseThinkingOutput(text: string, provider: Provider, modelId: s
   return { ...result.data, provider, model_id: modelId, tokens_used: tokensUsed }
 }
 
-export function parseReviewHunks(
-  text:  string,
-  round: number,
-  code?: string,  // the file content — used to validate original_code anchors
+// Validate hunk anchors against the file content. Keeps hunks whose
+// original_code appears verbatim (or whitespace-normalized) in the file.
+// Hunks without original_code are kept and handled by line-hint fallback.
+export function filterHunksByAnchor(
+  hunks: ReviewHunk[],
+  code:  string,
 ): { hunks: ReviewHunk[]; droppedCount: number; droppedReasons: string[] } {
-  const raw = parseJSON<unknown[]>(text, 'reviewAndPatch')
-  if (!Array.isArray(raw)) return { hunks: [], droppedCount: 0, droppedReasons: [] }
-
-  const parsed = reviewHunksSchema.parse(raw).map((h, i) => ({
-    ...h,
-    id: h.id || `h_${round}_${String(i + 1).padStart(3, '0')}`,
-  }))
-
-  if (!code) return { hunks: parsed, droppedCount: 0, droppedReasons: [] }
-
   const valid:   ReviewHunk[] = []
   const dropped: string[]     = []
+  const normalizedCode = code.split('\n').map(l => l.trimEnd()).join('\n')
 
-  for (const hunk of parsed) {
+  for (const hunk of hunks) {
     const anchor = hunk.original_code?.trim()
-    if (!anchor) {
-      // No anchor provided — keep hunk but rely on line-hint fallback apply
+    if (!anchor) { valid.push(hunk); continue }
+    if (
+      code.includes(hunk.original_code!) ||
+      normalizedCode.includes(hunk.original_code!.split('\n').map(l => l.trimEnd()).join('\n'))
+    ) {
       valid.push(hunk)
       continue
     }
-    // Exact match
-    if (code.includes(hunk.original_code!)) {
-      valid.push(hunk)
-      continue
-    }
-    // Whitespace-normalized match (handles trailing-space differences)
-    const normalizedCode   = code.split('\n').map(l => l.trimEnd()).join('\n')
-    const normalizedAnchor = hunk.original_code!.split('\n').map(l => l.trimEnd()).join('\n')
-    if (normalizedCode.includes(normalizedAnchor)) {
-      valid.push(hunk)
-      continue
-    }
-    // No match — drop the hunk
     const reason = `hunk ${hunk.id} (${hunk.filename} ~L${hunk.line_start}): original_code not found in file`
     console.warn(`[reviewAndPatch] dropped hunk — ${reason}`)
     dropped.push(reason)
@@ -594,89 +625,72 @@ export function parseReviewHunks(
   return { hunks: valid, droppedCount: dropped.length, droppedReasons: dropped }
 }
 
-// Parse a re-review response ({ verdicts, new_issues }) and return the subset
-// of hunks that still need fixing (NOT_FIXED verdict hunks + new HIGH issues).
-export function parseReReviewResponse(
-  text:                string,
+// Kept for backward compatibility — delegates to filterHunksByAnchor.
+export function parseReviewHunks(
+  text:  string,
+  round: number,
+  code?: string,
+): { hunks: ReviewHunk[]; droppedCount: number; droppedReasons: string[] } {
+  const raw = parseJSON<unknown[]>(text, 'reviewAndPatch')
+  if (!Array.isArray(raw)) return { hunks: [], droppedCount: 0, droppedReasons: [] }
+  const parsed = reviewHunksSchema.parse(raw).map((h, i) => ({
+    ...h,
+    id: h.id || `h_${round}_${String(i + 1).padStart(3, '0')}`,
+  }))
+  if (!code) return { hunks: parsed, droppedCount: 0, droppedReasons: [] }
+  return filterHunksByAnchor(parsed, code)
+}
+
+// Process already-validated re-review verdicts into the hunk list for the next
+// patch round. Separated from JSON parsing so parseWithRepair can validate first.
+function applyReReviewVerdicts(
+  verdicts:            Array<{ id: string; status: 'FIXED' | 'NOT_FIXED'; hunk?: ReviewHunk }>,
+  newIssues:           ReviewHunk[],
   previousHunkRecords: PreviousHunkRecord[],
   code:                string,
   round:               number,
 ): { hunks: ReviewHunk[]; droppedCount: number; droppedReasons: string[] } {
-  const raw = parseJSON<Record<string, unknown>>(text, 'reReview')
-  if (!raw) return { hunks: [], droppedCount: 0, droppedReasons: [] }
-
-  const verdicts: HunkVerdict[] = Array.isArray(raw.verdicts)
-    ? (raw.verdicts as unknown[]).map((v): HunkVerdict => {
-        const obj = v as Record<string, unknown>
-        return {
-          id:   String(obj.id ?? ''),
-          status: obj.status === 'FIXED' ? 'FIXED' : 'NOT_FIXED',
-          hunk: obj.hunk ? (obj.hunk as ReviewHunk) : undefined,
-        }
-      })
-    : []
-
-  const newIssuesRaw: unknown[] = Array.isArray(raw.new_issues) ? raw.new_issues : []
-
   const resultHunks: ReviewHunk[] = []
 
-  // Collect NOT_FIXED hunks (with updated fix from the verdict if provided)
   for (const verdict of verdicts) {
     if (verdict.status === 'NOT_FIXED') {
       if (verdict.hunk) {
         resultHunks.push({ ...verdict.hunk, id: verdict.hunk.id || `rev_${verdict.id}_${round}` })
       } else {
-        // Model said NOT_FIXED but didn't provide a new hunk — find the original record
         const orig = previousHunkRecords.find(r => r.id === verdict.id)
         if (orig) {
           resultHunks.push({
-            id:            `rev_${verdict.id}_${round}`,
-            filename:      'unknown',
-            line_start:    1,
-            line_end:      1,
-            severity:      'HIGH',
-            issue:         orig.issue,
-            original_code: orig.original_code,
-            fixed_code:    '',
-            category:      'correctness',
+            id: `rev_${verdict.id}_${round}`, filename: 'unknown',
+            line_start: 1, line_end: 1, severity: 'HIGH',
+            issue: orig.issue, original_code: orig.original_code,
+            fixed_code: '', category: 'correctness',
           })
         }
       }
     }
   }
 
-  // Mark any previous issue not mentioned in verdicts as still outstanding
+  // Mark previous issues not mentioned in verdicts as still outstanding
   for (const record of previousHunkRecords) {
-    const mentioned = verdicts.some(v => v.id === record.id)
-    if (!mentioned) {
+    if (!verdicts.some(v => v.id === record.id)) {
       resultHunks.push({
-        id:            `unverified_${record.id}_${round}`,
-        filename:      'unknown',
-        line_start:    1,
-        line_end:      1,
-        severity:      'HIGH',
-        issue:         record.issue,
-        original_code: record.original_code,
-        fixed_code:    '',
-        category:      'correctness',
+        id: `unverified_${record.id}_${round}`, filename: 'unknown',
+        line_start: 1, line_end: 1, severity: 'HIGH',
+        issue: record.issue, original_code: record.original_code,
+        fixed_code: '', category: 'correctness',
       })
     }
   }
 
-  // Collect new HIGH issues — validate directly without a JSON round-trip
   const droppedReasons: string[] = []
   let droppedCount = 0
-  const rawNewHunks = reviewHunksSchema.parse(newIssuesRaw).map((h, i) => ({
-    ...h,
-    id: h.id || `new_${round}_${String(i + 1).padStart(3, '0')}`,
-  }))
-  for (const h of rawNewHunks) {
+  for (const h of newIssues.map((h, i) => ({ ...h, id: h.id || `new_${round}_${String(i + 1).padStart(3, '0')}` }))) {
     if (h.severity !== 'HIGH') continue
     const anchor = h.original_code?.trim()
     if (anchor) {
+      const normalCode = code.split('\n').map(l => l.trimEnd()).join('\n')
       const inFile = code.includes(h.original_code!)
-        || code.split('\n').map(l => l.trimEnd()).join('\n')
-             .includes(h.original_code!.split('\n').map(l => l.trimEnd()).join('\n'))
+        || normalCode.includes(h.original_code!.split('\n').map(l => l.trimEnd()).join('\n'))
       if (!inFile) {
         const reason = `new_issue ${h.id}: original_code not found in file`
         console.warn(`[reReview] dropped — ${reason}`)
@@ -688,7 +702,21 @@ export function parseReReviewResponse(
     resultHunks.push(h)
   }
 
-  return { hunks: resultHunks, droppedCount, droppedReasons }
+  return { hunks: resultHunks, droppedCount: droppedCount + droppedReasons.length, droppedReasons }
+}
+
+// Kept for backward compatibility — delegates to applyReReviewVerdicts.
+export function parseReReviewResponse(
+  text:                string,
+  previousHunkRecords: PreviousHunkRecord[],
+  code:                string,
+  round:               number,
+): { hunks: ReviewHunk[]; droppedCount: number; droppedReasons: string[] } {
+  const raw = parseJSON<Record<string, unknown>>(text, 'reReview')
+  if (!raw) return { hunks: [], droppedCount: 0, droppedReasons: [] }
+  const validated = reReviewResponseSchema.safeParse(raw)
+  if (!validated.success) return { hunks: [], droppedCount: 0, droppedReasons: [] }
+  return applyReReviewVerdicts(validated.data.verdicts, validated.data.new_issues as ReviewHunk[], previousHunkRecords, code, round)
 }
 
 export function parseCrossReviewResponse(
@@ -1008,28 +1036,39 @@ export abstract class BaseAdapter implements ModelAdapter {
     } catch (err) {
       throw this.wrapPhaseError(err, 'proposeSpecAndManifest')
     }
-    const result = parseSpecAndManifest(raw, taskDescription, answers)
-    if (result) return result
-    // Fallback — parse failed. id/project_id/session_id are session metadata the
-    // orchestrator backfills after receiving this result.
+
+    let validated: { spec: Record<string, unknown>; manifest: Record<string, unknown> }
+    try {
+      validated = await parseWithRepair(
+        raw,
+        specAndManifestOutputSchema as z.ZodSchema<{ spec: Record<string, unknown>; manifest: Record<string, unknown> }>,
+        (err) => this.completeNonStreaming(PROPOSE_SPEC_MANIFEST_SYSTEM_PROMPT,
+          `Your previous response could not be parsed. Error: ${err}\nOriginal task:\n${userMsg}\n\nRespond with ONLY the corrected JSON — no markdown fences, no prose.`),
+        'proposeSpecAndManifest',
+        (reason) => dbg.phase2('json-repair', { reason, model: this.getModelId() }),
+      )
+    } catch {
+      // Both attempts failed — fall back to minimal valid output
+      return this.specManifestFallback(taskDescription, answers)
+    }
+
+    const result = parseSpecAndManifest(JSON.stringify(validated), taskDescription, answers)
+    return result ?? this.specManifestFallback(taskDescription, answers)
+  }
+
+  private specManifestFallback(taskDescription: string, answers: Record<string, string>): { spec: SpecDocument; manifest: FileManifest } {
     return {
       spec: {
-        id:                  generateId(),
-        project_id:          '',
-        session_id:          '',
-        created_at:          new Date().toISOString(),
-        task_description:    taskDescription,
-        user_decisions:      answers,
-        model_defaults:      {},
-        acceptance_criteria: [],
-        edge_cases:          [],
-        error_messages:      [],
-        human_confirmed:     false,
+        id: generateId(), project_id: '', session_id: '',
+        created_at: new Date().toISOString(),
+        task_description: taskDescription,
+        user_decisions: answers, model_defaults: {},
+        acceptance_criteria: [], edge_cases: [], error_messages: [],
+        human_confirmed: false,
       },
       manifest: {
         mode: 'single',
-        files: [{ filename: 'output.ts', purpose: 'main output',
-                  exports: [], imports: {} }],
+        files: [{ filename: 'output.ts', purpose: 'main output', exports: [], imports: {} }],
         generation_order: ['output.ts'],
         reasoning: 'Fallback — parse failed',
       },
@@ -1130,6 +1169,7 @@ export abstract class BaseAdapter implements ModelAdapter {
       ? `\nCOMPILER ERRORS (fix these first — ground truth, not opinions):\n${compilerErrors.join('\n')}`
       : ''
 
+    const phase = `reviewAndPatch:${filename}:round${round}`
     try {
       if (round === 1 || !previousHunkRecords?.length) {
         // ── Initial review ──────────────────────────────────────────────────
@@ -1143,8 +1183,26 @@ export abstract class BaseAdapter implements ModelAdapter {
           '\nCODE (line numbers are display-only — do NOT include them in original_code/fixed_code):\n' + numberedCode,
         ].filter(Boolean).join('\n')
         const raw = await this.completeNonStreaming(REVIEW_AND_PATCH_SYSTEM_PROMPT, userMsg)
-        const { hunks, droppedCount } = parseReviewHunks(raw, round, code)
+
+        let hunksRaw: ReviewHunk[]
+        try {
+          hunksRaw = await parseWithRepair(
+            raw, reviewHunksStrictSchema,
+            (err) => this.completeNonStreaming(REVIEW_AND_PATCH_SYSTEM_PROMPT,
+              `Your previous response could not be parsed. Error: ${err}\nOriginal request:\n${userMsg}\n\nRespond with ONLY the corrected JSON array, no markdown fences, no prose.`),
+            phase,
+            (reason) => dbg.review('json-repair', { reason, model: this.getModelId() }),
+          )
+        } catch {
+          return { hunks: [], droppedCount: 0 }
+        }
+
+        const hunksWithIds = hunksRaw.map((h, i) => ({
+          ...h, id: h.id || `h_${round}_${String(i + 1).padStart(3, '0')}`,
+        })) as ReviewHunk[]
+        const { hunks, droppedCount } = filterHunksByAnchor(hunksWithIds, code)
         return { hunks, droppedCount }
+
       } else {
         // ── Re-review mode (round > 1) ──────────────────────────────────────
         const prevBlock = previousHunkRecords.map(r =>
@@ -1161,11 +1219,27 @@ export abstract class BaseAdapter implements ModelAdapter {
           '\nCURRENT FILE (after patches — line numbers are display-only):\n' + numberedCode,
         ].filter(Boolean).join('\n')
         const raw = await this.completeNonStreaming(REVIEW_AND_PATCH_REVERIFY_SYSTEM_PROMPT, userMsg)
-        const { hunks, droppedCount, droppedReasons } = parseReReviewResponse(raw, previousHunkRecords, code, round)
+
+        let validated: z.infer<typeof reReviewResponseSchema>
+        try {
+          validated = await parseWithRepair(
+            raw, reReviewResponseSchema,
+            (err) => this.completeNonStreaming(REVIEW_AND_PATCH_REVERIFY_SYSTEM_PROMPT,
+              `Your previous response could not be parsed. Error: ${err}\nOriginal request:\n${userMsg}\n\nRespond with ONLY the corrected JSON, no markdown fences, no prose.`),
+            `${phase}:reReview`,
+            (reason) => dbg.review('json-repair', { reason, model: this.getModelId() }),
+          )
+        } catch {
+          return { hunks: [], droppedCount: 0 }
+        }
+
+        const { hunks, droppedCount, droppedReasons } = applyReReviewVerdicts(
+          validated.verdicts, validated.new_issues as ReviewHunk[], previousHunkRecords, code, round,
+        )
         return { hunks, droppedCount: droppedCount + droppedReasons.length }
       }
     } catch (err) {
-      throw this.wrapPhaseError(err, `reviewAndPatch:${filename}:round${round}`)
+      throw this.wrapPhaseError(err, phase)
     }
   }
 
@@ -1185,11 +1259,23 @@ export abstract class BaseAdapter implements ModelAdapter {
       '\nOTHER REVIEWER\'S FIX:\n' + theirHunk.fixed_code,
       '\nOTHER REVIEWER\'S REASONING: ' + theirHunk.issue,
     ].join('\n')
+    const phase = `crossReview:${conflict.id}`
     try {
       const raw = await this.completeNonStreaming(CROSS_REVIEW_SYSTEM_PROMPT, userMsg)
-      return parseCrossReviewResponse(raw, conflict.id)
+      try {
+        const validated = await parseWithRepair(
+          raw, crossReviewResponseSchema,
+          (err) => this.completeNonStreaming(CROSS_REVIEW_SYSTEM_PROMPT,
+            `Your previous response could not be parsed. Error: ${err}\nOriginal request:\n${userMsg}\n\nRespond with ONLY the corrected JSON — no markdown fences, no prose.`),
+          phase,
+          (reason) => dbg.review('json-repair', { reason, model: this.getModelId() }),
+        )
+        return { ...validated, conflict_id: validated.conflict_id || conflict.id }
+      } catch {
+        return { conflict_id: conflict.id, decision: 'KEEP_MINE', reason: 'parse failed' }
+      }
     } catch (err) {
-      throw this.wrapPhaseError(err, `crossReview:${conflict.id}`)
+      throw this.wrapPhaseError(err, phase)
     }
   }
 

@@ -4,6 +4,9 @@ import type {
   Provider,
   ThinkingOutput,
 } from '@/types'
+import { thinkingOutputSchema } from '@/types'
+import { dbg } from '@/lib/debug'
+import { alignmentOutputSchema } from '@/lib/schemas'
 import type { StreamUsage } from './base'
 import {
   ALIGNMENT_SYSTEM_PROMPT,
@@ -15,6 +18,7 @@ import {
   isUnparseableThinkingOutput,
   parseJSON,
   parseThinkingOutput,
+  parseWithRepair,
   withRetry,
 } from './base'
 
@@ -61,9 +65,25 @@ export class ClaudeAdapter extends BaseAdapter {
       const text   = block?.type === 'text' ? block.text : ''
       if (!text.trim()) throw new Error('empty response from model — retrying')
       const tokens = res.usage.input_tokens + res.usage.output_tokens
-      const output = parseThinkingOutput(text, 'anthropic', this.modelId, tokens)
 
-      // If model returned prose/code instead of JSON, convert it to structured format
+      // If parseJSON returns null (no JSON found at all), try one repair call
+      // before falling through to the prose-conversion path.
+      if (!parseJSON<unknown>(text, 'think')) {
+        try {
+          const repaired = await parseWithRepair(
+            text, thinkingOutputSchema,
+            (err) => this.completeNonStreaming(THINKING_SYSTEM_PROMPT,
+              `Your previous response could not be parsed as JSON. Error: ${err}\nTask: ${taskDescription.slice(0, 300)}\n\nRespond with ONLY the required JSON — no markdown fences, no prose.`),
+            'think',
+            (reason) => dbg.phase1('json-repair', { reason, model: this.modelId }),
+          )
+          return { ...repaired, provider: 'anthropic', model_id: this.modelId, tokens_used: tokens }
+        } catch {
+          return await this.convertFreeFormToThinkingJson(text, taskDescription, tokens)
+        }
+      }
+
+      const output = parseThinkingOutput(text, 'anthropic', this.modelId, tokens)
       if (isUnparseableThinkingOutput(output)) {
         return await this.convertFreeFormToThinkingJson(text, taskDescription, tokens)
       }
@@ -121,9 +141,14 @@ export class ClaudeAdapter extends BaseAdapter {
     try {
       const text = await this.completeNonStreaming(ALIGNMENT_SYSTEM_PROMPT, prompt)
       if (!text.trim()) throw new Error('empty response from model — retrying')
-      const raw = parseJSON<Record<string, unknown>>(text, 'alignment')
-      if (!raw) throw new Error('alignment response parse failed — retrying')
-      return this.makeAlignmentMessage(round, 'reviewer', raw)
+      const validated = await parseWithRepair(
+        text, alignmentOutputSchema,
+        (err) => this.completeNonStreaming(ALIGNMENT_SYSTEM_PROMPT,
+          `Your previous response could not be parsed. Error: ${err}\nOriginal request:\n${prompt.slice(0, 500)}\n\nRespond with ONLY the corrected JSON — no markdown fences, no prose.`),
+        'chat',
+        (reason) => dbg.align('json-repair', { reason, model: this.modelId }),
+      )
+      return this.makeAlignmentMessage(round, 'reviewer', validated as Record<string, unknown>)
     } catch (err) {
       throw wrapErr(err, 'chat', this.modelId)
     }
