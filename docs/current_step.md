@@ -1,30 +1,28 @@
 # Current Build Step
-Step: PROMPT 6 — Native npm distribution
+Step: PROMPT 7 — Workspace mode
 Status: COMPLETE
 Started: 2026-07-06
 Last Updated: 2026-07-06
 
 ## What Is Done In This Step
 
-- `bin/crucible.mjs` — launcher CLI with `start`, `doctor`, `reset --confirm` commands
-- First-run setup: creates `~/.crucible/data/` + `~/.crucible/logs/`, generates `secret.key` (0600)
-- `CRUCIBLE_HOME` override respected throughout (env → default ~/.crucible)
-- Server bound to 127.0.0.1 by default; `--host 0.0.0.0` as explicit opt-in with warning
-- Port auto-fallback via `net.createServer` probe when requested port is busy
-- Browser auto-opens after 1.5s delay (xdg-open / open / start per platform)
-- `crucible doctor`: Node version, CRUCIBLE_HOME writable, key validity, data dir, DB schema, build present, git, claude CLI, codex CLI — exits non-zero on critical failures
-- `crucible reset --confirm`: wipes `pipeline_sessions` + `session_costs` via inline CJS script against standalone/node_modules/better-sqlite3
-- `scripts/postbuild.mjs`: copies .next/static, public/, drizzle/, better-sqlite3 into standalone
-- `src/lib/crypto/index.ts`: getKey() reads ENCRYPTION_KEY env first, then key file (native fallback)
-- `package.json`: bin, files, engines, description, postbuild script; "private" removed
-- `sentry.server.config.ts`: distribution tag (native | docker) on all events
-- README.md: native install as primary Quick Start, Docker as alternative section
-- tsc clean, 58/58 tests passing
+- `drizzle/0002_workspace_dir.sql` — ALTER TABLE adds `workspace_dir TEXT` (nullable) to projects
+- `drizzle/meta/_journal.json` — migration entry added; auto-migrates on next server start
+- `src/lib/db/schema.ts` — `workspaceDir` text column added to projects table
+- `src/lib/workspace/paths.ts` — `resolveInWorkspace(workspaceDir, relPath)` rejects null bytes and path traversal (both `..` and absolute paths); every write/read goes through it
+- `src/lib/workspace/index.ts` — `prepareWorkspaceForSession`, `writeAcceptedFile`, `readWorkspaceFile`, `listWorkspaceFiles`, `getFileCommitHash`; git integration via execFile (no new deps); git failure is non-fatal (warns and continues)
+- `src/types/index.ts` — `workspaceDir?: string | null` added to `PipelineSessionState`
+- `src/lib/pipeline/orchestrator.ts` — `StartPipelineParams.workspaceDir`; `createSession` stores it in state; `acceptCurrentFile` calls `writeAcceptedFile` if workspace set; `applyOutputFix` writes to workspace too
+- `src/app/api/pipeline/start/route.ts` — loads `workspaceDir` from DB; calls `prepareWorkspaceForSession` before session; passes to `createSession`
+- `src/app/api/projects/route.ts` — POST accepts optional `workspaceDir`
+- `src/app/api/files/[projectId]/route.ts` — returns `workspaceDir` + per-file `inWorkspace: boolean`
+- `src/app/api/files/[projectId]/[...filepath]/route.ts` — GET returns `commitHash` + `workspacePath`
+- `src/components/files/FilesSection.tsx` — workspace dir shown in tree header; per-file ✓ badge when written to workspace; file header shows real absolute path + commit hash
+- tsc: 0 errors; 58/58 tests pass; committed `7b98c41`
 
 ## What Remains In This Step
 
-- Full smoke test: `npm run build && npm pack && npm install -g crucible-*.tgz && crucible doctor`
-  (requires a complete build environment — deferred to CI / release workflow)
+- UI for picking/linking workspace during project creation (no spec'd yet — deferred)
 
 ## Blockers
 
@@ -32,6 +30,4 @@ Last Updated: 2026-07-06
 
 ## Next
 
-- PROMPT 7 (TBD)
-- Workspace linking (P7): link project output to a local folder using the native data dir
-- CLI reviewer backends (P11): crucible now installs cleanly so CLI tool integration is simpler
+- PROMPT 8 (TBD)
