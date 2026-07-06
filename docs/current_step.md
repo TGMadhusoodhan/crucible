@@ -1,21 +1,28 @@
 # Current Build Step
-Step: PROMPT 9 — Interface index
+Step: PROMPT 10 — GitHub integration
 Status: COMPLETE
 Started: 2026-07-06
 Last Updated: 2026-07-06
 
 ## What Is Done In This Step
 
-- `src/lib/workspace/indexer.ts` — TypeScript compiler API (syntactic, no type-checker); extracts function signatures, interfaces (full text), type aliases, class public-method signatures, enums, const/let exports, re-exports; `buildSignatureBlock(filename, code)` + `indexWorkspaceFiles(dir, registry, driftedFiles)` for incremental backfill
-- `src/lib/pipeline/context-builder.ts` — three-tier context builder: T1 direct deps full source (12k token cap, demotion), T2 other known files signature blocks (6k cap, omit largest-first), T3 pending files one-line purposes; `buildGenerationContext()` + `buildReviewerDepContext()`
-- `src/types/index.ts` — `signatureBlock?: string` on `RegistryEntry`; `registry?: RegistryEntry[]` on `ModelAdapter.generate()` and `ModelAdapter.reviewAndPatch()`
-- `src/lib/workspace/memory.ts` — exported `writeRegistry` (was private)
-- `src/lib/adapters/base.ts` — `generate()` replaced hand-rolled depContext with context-builder tiers; `reviewAndPatch()` injects direct-dep signature blocks into round-1 reviewer prompt for cross-file contract violation detection
-- `src/lib/pipeline/phase3-generate.ts` — `registry?` param threaded to `coderAdapter.generate()`
-- `src/lib/pipeline/phase3-review.ts` — `registry?` param threaded to both `r1Adapter.reviewAndPatch()` and `r2Adapter.reviewAndPatch()`
-- `src/lib/pipeline/orchestrator.ts` — imports indexer; calls `indexWorkspaceFiles` + `writeRegistry` in `createSession` to backfill signature blocks; loads `sessionRegistry` once before phase3 loop; passes to `runPhase3Generate` and `runPhase3Review`; `acceptCurrentFile` stores `signatureBlock: buildSignatureBlock(fname, code)` in registry
-- `test/unit/indexer.test.ts` — 22 tests across 6 describe blocks: functions/consts, interfaces/types, classes, default exports/overloads, re-exports, non-TS fallback
-- tsc: 0 errors; 80/80 tests pass
+- `src/lib/workspace/github.ts` — push mechanics with token scrubbing, GitHub REST helpers, git CLI push (token URL as direct arg, never persisted)
+- `src/lib/db/schema.ts` — metadata column on api_credentials; githubRepo/githubPushMode/githubBranch on projects
+- `drizzle/0003_github_integration.sql` — migration applied on startup
+- `src/app/api/credentials/route.ts` — 'github' credential provider; PAT validation via /user endpoint; login name stored in metadata and exposed in GET
+- `src/app/api/projects/[id]/route.ts` — PATCH endpoint for GitHub settings (repo validation on link)
+- `src/app/api/projects/[id]/push/route.ts` — POST manual push endpoint
+- `src/app/api/github/repos/route.ts` — POST create private GitHub repo
+- `src/app/api/pipeline/output-gate/accept/route.ts` — push result returned in response
+- `src/lib/pipeline/orchestrator.ts` — tryGitHubPush helper; per_file push wired in acceptCurrentFile; per_session push in acceptOutputFile
+- `src/types/index.ts` — github_push_success + github_push_failed SSE events
+- `src/store/index.ts` — githubPush state; reducer cases
+- `src/hooks/usePipeline.ts` — SSE event dispatch
+- `src/components/pipeline/CompletePanel.tsx` — push status card (SHA link + branch, or error)
+- `src/components/shared/CredentialsManager.tsx` — GitHub PAT section with instructions + login display
+- `src/app/(dashboard)/projects/page.tsx` — GitHub tab: repo link, push mode, branch, create repo, manual push button
+- `test/unit/github.test.ts` — 6 token scrubbing tests
+- tsc: 0 errors. 86/86 tests pass.
 
 ## What Remains In This Step
 
@@ -27,4 +34,4 @@ Last Updated: 2026-07-06
 
 ## Next
 
-- PROMPT 10 (TBD)
+- PROMPT 11 (TBD)

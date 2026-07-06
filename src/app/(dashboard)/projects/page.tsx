@@ -4,15 +4,18 @@ import { useEffect, useState } from 'react'
 import type { ProjectContext } from '@/types'
 
 interface Project {
-  id:           string
-  name:         string
-  description:  string
-  r1Provider:   string
-  r1ModelId:    string
-  r2Provider:   string
-  r2ModelId:    string
-  createdAt:    number
-  workspaceDir: string | null
+  id:              string
+  name:            string
+  description:     string
+  r1Provider:      string
+  r1ModelId:       string
+  r2Provider:      string
+  r2ModelId:       string
+  createdAt:       number
+  workspaceDir:    string | null
+  githubRepo:      string | null
+  githubPushMode:  string | null
+  githubBranch:    string | null
 }
 
 function Badge({ label, value }: { label: string; value: string }) {
@@ -133,13 +136,218 @@ function FileIndex({ entries }: { entries: ProjectContext['fileIndex'] }) {
   )
 }
 
+function GitHubSettings({
+  projectId,
+  project,
+  onSaved,
+}: {
+  projectId: string
+  project:   Project | undefined
+  onSaved:   () => void
+}) {
+  const [repo,     setRepo]     = useState(project?.githubRepo     ?? '')
+  const [mode,     setMode]     = useState(project?.githubPushMode ?? 'off')
+  const [branch,   setBranch]   = useState(project?.githubBranch   ?? 'main')
+  const [saving,   setSaving]   = useState(false)
+  const [error,    setError]    = useState('')
+  const [success,  setSuccess]  = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [newName,  setNewName]  = useState('')
+  const [creating2,setCreating2]= useState(false)
+  const [createErr,setCreateErr]= useState('')
+
+  async function handleSave(e: React.FormEvent) {
+    e.preventDefault()
+    setSaving(true); setError(''); setSuccess(false)
+    try {
+      const res  = await fetch(`/api/projects/${projectId}`, {
+        method:  'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ githubRepo: repo.trim() || null, githubPushMode: mode, githubBranch: branch.trim() || 'main' }),
+      })
+      const data = await res.json() as { success: boolean; error?: string }
+      if (data.success) { setSuccess(true); onSaved() }
+      else setError(data.error ?? 'Save failed')
+    } catch { setError('Network error') }
+    finally { setSaving(false) }
+  }
+
+  async function handleCreate(e: React.FormEvent) {
+    e.preventDefault()
+    if (!newName.trim()) return
+    setCreating2(true); setCreateErr('')
+    try {
+      const res  = await fetch('/api/github/repos', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ name: newName.trim() }),
+      })
+      const data = await res.json() as { success: boolean; data?: { fullName: string }; error?: string }
+      if (data.success && data.data?.fullName) {
+        setRepo(data.data.fullName)
+        setCreating(false)
+        setNewName('')
+      } else {
+        setCreateErr(data.error ?? 'Failed to create repo')
+      }
+    } catch { setCreateErr('Network error') }
+    finally { setCreating2(false) }
+  }
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <p className="text-xs font-medium text-zinc-300">GitHub push settings</p>
+        <p className="mt-0.5 text-[11px] text-zinc-600">
+          Push accepted files to a GitHub repo automatically.{' '}
+          Requires a GitHub PAT in Settings → API Keys.
+        </p>
+      </div>
+
+      <form onSubmit={handleSave} className="space-y-4">
+        <div className="space-y-1.5">
+          <label className="block text-[11px] font-medium text-zinc-400">Repository (owner/name)</label>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={repo}
+              onChange={e => setRepo(e.target.value)}
+              placeholder="owner/repo-name"
+              className="flex-1 rounded border border-zinc-700 bg-zinc-900 px-3 py-2 font-mono text-xs text-zinc-200 placeholder-zinc-700 focus:border-zinc-500 focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={() => setCreating(c => !c)}
+              className="rounded border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 transition-colors"
+            >
+              + New repo
+            </button>
+          </div>
+        </div>
+
+        {creating && (
+          <form onSubmit={handleCreate} className="rounded border border-zinc-800 bg-zinc-900/60 p-3 space-y-2">
+            <p className="text-[11px] text-zinc-500">Create a new private GitHub repo:</p>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={newName}
+                onChange={e => setNewName(e.target.value)}
+                placeholder="my-project"
+                className="flex-1 rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 font-mono text-xs text-zinc-200 placeholder-zinc-700 focus:border-zinc-500 focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={!newName.trim() || creating2}
+                className="rounded bg-zinc-700 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-600 disabled:opacity-40 transition-colors"
+              >
+                {creating2 ? 'Creating…' : 'Create'}
+              </button>
+            </div>
+            {createErr && <p className="text-[11px] text-red-400">{createErr}</p>}
+          </form>
+        )}
+
+        <div className="space-y-1.5">
+          <label className="block text-[11px] font-medium text-zinc-400">Branch</label>
+          <input
+            type="text"
+            value={branch}
+            onChange={e => setBranch(e.target.value)}
+            placeholder="main"
+            className="w-full rounded border border-zinc-700 bg-zinc-900 px-3 py-2 font-mono text-xs text-zinc-200 placeholder-zinc-700 focus:border-zinc-500 focus:outline-none"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="block text-[11px] font-medium text-zinc-400">Push mode</label>
+          <div className="space-y-1.5">
+            {([
+              ['off',         'Off — no automatic push'],
+              ['per_file',    'Per file — push after each accepted file'],
+              ['per_session', 'Per session — push once when session completes'],
+            ] as const).map(([val, label]) => (
+              <label key={val} className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="pushMode"
+                  value={val}
+                  checked={mode === val}
+                  onChange={() => setMode(val)}
+                  className="accent-blue-500"
+                />
+                <span className="text-xs text-zinc-400">{label}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {error   && <p className="text-[11px] text-red-400">{error}</p>}
+        {success && <p className="text-[11px] text-emerald-400">Saved</p>}
+
+        <button
+          type="submit"
+          disabled={saving}
+          className="rounded bg-zinc-700 px-4 py-2 text-xs font-medium text-zinc-200 hover:bg-zinc-600 disabled:opacity-40 transition-colors"
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </form>
+
+      {/* Manual push */}
+      {project?.githubRepo && project.workspaceDir && (
+        <ManualPushButton projectId={projectId} repo={project.githubRepo} />
+      )}
+    </div>
+  )
+}
+
+function ManualPushButton({ projectId, repo }: { projectId: string; repo: string }) {
+  const [pushing, setPushing] = useState(false)
+  const [result,  setResult]  = useState<{ sha: string; url: string } | null>(null)
+  const [error,   setError]   = useState('')
+
+  async function handlePush() {
+    setPushing(true); setResult(null); setError('')
+    try {
+      const res  = await fetch(`/api/projects/${projectId}/push`, { method: 'POST' })
+      const data = await res.json() as { success: boolean; data?: { sha: string; branch: string; url: string }; error?: string }
+      if (data.success && data.data) setResult(data.data)
+      else setError(data.error ?? 'Push failed')
+    } catch { setError('Network error') }
+    finally { setPushing(false) }
+  }
+
+  return (
+    <div className="border-t border-zinc-800 pt-4 space-y-2">
+      <p className="text-[11px] text-zinc-500">Manual push of workspace to <span className="font-mono text-zinc-400">{repo}</span>:</p>
+      <button
+        onClick={handlePush}
+        disabled={pushing}
+        className="rounded border border-zinc-700 px-4 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40 transition-colors"
+      >
+        {pushing ? 'Pushing…' : 'Push now'}
+      </button>
+      {result && (
+        <p className="text-[11px] text-emerald-400">
+          Pushed{' '}
+          <a href={result.url} target="_blank" rel="noopener noreferrer" className="underline font-mono">
+            {result.sha.slice(0, 7)}
+          </a>
+        </p>
+      )}
+      {error && <p className="text-[11px] text-red-400">{error}</p>}
+    </div>
+  )
+}
+
 export default function ProjectsPage() {
   const [projects, setProjects]       = useState<Project[]>([])
   const [selected, setSelected]       = useState<string | null>(null)
   const [context, setContext]         = useState<ProjectContext | null>(null)
   const [ctxLoading, setCtxLoading]   = useState(false)
   const [listLoading, setListLoading] = useState(true)
-  const [activeTab, setActiveTab]     = useState<'overview' | 'decisions' | 'files'>('overview')
+  const [activeTab, setActiveTab]     = useState<'overview' | 'decisions' | 'files' | 'github'>('overview')
 
   useEffect(() => {
     fetch('/api/projects')
@@ -252,7 +460,7 @@ export default function ProjectsPage() {
 
                 {/* Tabs */}
                 <div className="flex gap-0 border-b border-zinc-800 px-6">
-                  {(['overview', 'decisions', 'files'] as const).map(tab => (
+                  {(['overview', 'decisions', 'files', 'github'] as const).map(tab => (
                     <button
                       key={tab}
                       onClick={() => setActiveTab(tab)}
@@ -299,6 +507,15 @@ export default function ProjectsPage() {
                   )}
                   {activeTab === 'decisions' && <DecisionLog decisions={context.decisions} />}
                   {activeTab === 'files' && <FileIndex entries={context.fileIndex} />}
+                  {activeTab === 'github' && selected && (
+                    <GitHubSettings projectId={selected} project={selectedProject} onSaved={() => {
+                      // Refresh project list to pick up new githubRepo/pushMode/branch
+                      fetch('/api/projects')
+                        .then(r => r.json() as Promise<{ success: boolean; data?: Project[] }>)
+                        .then(d => { if (d.success && d.data) setProjects(d.data) })
+                        .catch(() => {})
+                    }} />
+                  )}
                 </div>
               </div>
             )}

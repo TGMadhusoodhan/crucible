@@ -26,6 +26,7 @@ import {
   writeRegistry,
 } from '@/lib/workspace/memory'
 import { buildSignatureBlock, indexWorkspaceFiles } from '@/lib/workspace/indexer'
+import { pushWorkspace } from '@/lib/workspace/github'
 import { runPhase0Context }        from './phase0-context'
 import { runPhase1Thinking }       from './phase1-thinking'
 import { runPhase1_5Alignment }    from './phase1-5-alignment'
@@ -189,6 +190,47 @@ export async function saveSessionState(state: PipelineSessionState): Promise<voi
   // Schedule cleanup for terminal states
   if (state.phase === 'complete' || state.phase === 'stopped' || state.phase === 'error') {
     scheduleDbCleanup(state.sessionId)
+  }
+}
+
+// ─── GitHub push helper ────────────────────────────────────────────────────────
+// Reads project GitHub settings + decrypts token, calls pushWorkspace.
+// Never throws — emits github_push_failed SSE with scrubbed message on error.
+
+async function tryGitHubPush(
+  projectId:    string,
+  workspaceDir: string,
+  emit:         (e: SSEEvent) => void,
+): Promise<void> {
+  const [project] = await db
+    .select({ githubRepo: schema.projects.githubRepo, githubBranch: schema.projects.githubBranch })
+    .from(schema.projects)
+    .where(eq(schema.projects.id, projectId))
+    .limit(1)
+  if (!project?.githubRepo) return  // not linked
+
+  const [credRow] = await db
+    .select({ encryptedKey: schema.apiCredentials.encryptedKey, isValid: schema.apiCredentials.isValid })
+    .from(schema.apiCredentials)
+    .where(eq(schema.apiCredentials.provider, 'github'))
+    .limit(1)
+  if (!credRow?.isValid) {
+    emit({ type: 'github_push_failed', message: 'GitHub token not found or invalid' })
+    return
+  }
+
+  let token: string
+  try { token = decrypt(credRow.encryptedKey) } catch {
+    emit({ type: 'github_push_failed', message: 'Failed to decrypt GitHub token' })
+    return
+  }
+
+  try {
+    const result = await pushWorkspace(workspaceDir, project.githubRepo, project.githubBranch ?? 'main', token)
+    emit({ type: 'github_push_success', sha: result.sha, branch: result.branch, url: result.url })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Push failed'
+    emit({ type: 'github_push_failed', message: msg })
   }
 }
 
@@ -597,7 +639,16 @@ export async function resolveBudgetGate(sessionId: string): Promise<void> {
 // dual-review loop (or a human already resolved its conflicts). This is the
 // human's final skim before the session is marked complete and persisted.
 
-export async function acceptOutputFile(sessionId: string, filename: string): Promise<{ done: boolean }> {
+export interface PushResult {
+  sha:    string
+  branch: string
+  url:    string
+}
+
+export async function acceptOutputFile(
+  sessionId: string,
+  filename:  string,
+): Promise<{ done: boolean; push?: PushResult | { error: string } }> {
   const state = await getSessionState(sessionId)
   if (!state) throw new Error(`Session not found: ${sessionId}`)
   if (state.phase !== 'output_gate') {
@@ -634,7 +685,33 @@ export async function acceptOutputFile(sessionId: string, filename: string): Pro
       } catch { /* non-fatal */ }
     }
 
-    return { done: true }
+    // per_session push: run after commit, return result to caller
+    let pushResult: PushResult | { error: string } | undefined
+    if (state.workspaceDir) {
+      try {
+        const [proj] = await db
+          .select({ githubPushMode: schema.projects.githubPushMode, githubRepo: schema.projects.githubRepo, githubBranch: schema.projects.githubBranch })
+          .from(schema.projects)
+          .where(eq(schema.projects.id, state.projectId))
+          .limit(1)
+        if (proj?.githubPushMode === 'per_session' && proj.githubRepo) {
+          const [credRow] = await db
+            .select({ encryptedKey: schema.apiCredentials.encryptedKey, isValid: schema.apiCredentials.isValid })
+            .from(schema.apiCredentials)
+            .where(eq(schema.apiCredentials.provider, 'github'))
+            .limit(1)
+          if (credRow?.isValid) {
+            const token = decrypt(credRow.encryptedKey)
+            const r = await pushWorkspace(state.workspaceDir, proj.githubRepo, proj.githubBranch ?? 'main', token)
+            pushResult = r
+          }
+        }
+      } catch (err) {
+        pushResult = { error: err instanceof Error ? err.message : 'Push failed' }
+      }
+    }
+
+    return { done: true, push: pushResult }
   }
 
   return { done: false }
@@ -837,6 +914,17 @@ export async function runPipeline(
     const coderAdapter = getAdapter(config.coderProvider, config.coderModelId, config.coderApiKey)
     const r1Adapter     = getAdapter(config.r1Provider,    config.r1ModelId,    config.r1ApiKey)
     const r2Adapter     = getAdapter(config.r2Provider,    config.r2ModelId,    config.r2ApiKey)
+
+    // Load GitHub push mode once — used in acceptCurrentFile (per_file) and at session complete (per_session)
+    let githubPushMode = 'off'
+    try {
+      const [proj] = await db
+        .select({ githubPushMode: schema.projects.githubPushMode })
+        .from(schema.projects)
+        .where(eq(schema.projects.id, projectId))
+        .limit(1)
+      githubPushMode = proj?.githubPushMode ?? 'off'
+    } catch { /* non-fatal */ }
 
     // Wire retry emitters so provider_retry SSE events reach the client
     const makeRetryEmit = (provider: Provider) => (attempt: number, delayMs: number) =>
@@ -1082,6 +1170,11 @@ export async function runPipeline(
       })
       updateCrucibleMd(wd, projName)
       void commitCrucibleFiles(wd, `crucible: accept ${fname}`)
+
+      // per_file push: fire after the commit (non-blocking, never fails pipeline)
+      if (githubPushMode === 'per_file') {
+        void tryGitHubPush(state!.projectId, wd, emit)
+      }
     }
   }
 

@@ -4,17 +4,21 @@ import { integer, primaryKey, real, sqliteTable, text } from 'drizzle-orm/sqlite
 // Moved from Redis — was project:{userId}:{id} + projects:{userId} set
 
 export const projects = sqliteTable('projects', {
-  id:           text('id').primaryKey(),
-  name:         text('name').notNull(),
-  description:  text('description').notNull().default(''),
+  id:               text('id').primaryKey(),
+  name:             text('name').notNull(),
+  description:      text('description').notNull().default(''),
   // Coder is always DeepSeek — not stored per-project, only R1/R2 vary.
-  r1Provider:   text('r1_provider').notNull(),
-  r1ModelId:    text('r1_model_id').notNull(),
-  r2Provider:   text('r2_provider').notNull(),
-  r2ModelId:    text('r2_model_id').notNull(),
-  createdAt:    integer('created_at').notNull(),  // unix ms
+  r1Provider:       text('r1_provider').notNull(),
+  r1ModelId:        text('r1_model_id').notNull(),
+  r2Provider:       text('r2_provider').notNull(),
+  r2ModelId:        text('r2_model_id').notNull(),
+  createdAt:        integer('created_at').notNull(),  // unix ms
   // Workspace: absolute host path to a local folder. Null = JSON-only mode.
-  workspaceDir: text('workspace_dir'),
+  workspaceDir:     text('workspace_dir'),
+  // GitHub integration (all optional — null means not linked)
+  githubRepo:       text('github_repo'),                        // "owner/name"
+  githubPushMode:   text('github_push_mode').default('off'),    // 'off' | 'per_file' | 'per_session'
+  githubBranch:     text('github_branch').default('main'),
 })
 
 // ─── API Credentials ──────────────────────────────────────────────────────────
@@ -25,6 +29,7 @@ export const apiCredentials = sqliteTable('api_credentials', {
   provider:     text('provider').notNull().unique(),
   encryptedKey: text('encrypted_key').notNull(),
   isValid:      integer('is_valid', { mode: 'boolean' }).notNull().default(false),
+  metadata:     text('metadata'),   // JSON blob — e.g. { login: "octocat" } for github
   createdAt:    integer('created_at').notNull(),
 })
 

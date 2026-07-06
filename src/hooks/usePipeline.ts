@@ -173,6 +173,12 @@ export function usePipeline() {
       case 'consensus':
         dispatch({ type: 'CONSENSUS', output: event.output })
         break
+      case 'github_push_success':
+        dispatch({ type: 'GITHUB_PUSH_SUCCESS', sha: event.sha, branch: event.branch, url: event.url })
+        break
+      case 'github_push_failed':
+        dispatch({ type: 'GITHUB_PUSH_FAILED', message: event.message })
+        break
     }
   }, [dispatch])
 

@@ -758,3 +758,5 @@ export type SSEEvent =
   | { type: 'usage_update';          provider: Provider; modelId: string; tokensIn: number; tokensOut: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number }
   | { type: 'budget_degradation';   reason: string; skipped: string[] }
   | { type: 'budget_gate';          filename: string; fileIndex: number; totalFiles: number; spentUsd: number; remainingUsd: number; estimatedFileUsd: number }
+  | { type: 'github_push_success';  sha: string; branch: string; url: string }
+  | { type: 'github_push_failed';   message: string }

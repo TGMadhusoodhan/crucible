@@ -7,7 +7,7 @@ import { usePipeline } from '@/hooks/usePipeline'
 import { cn } from '@/lib/utils'
 
 export function CompletePanel() {
-  const { output, acceptedFiles, spec, project } = usePipelineState()
+  const { output, acceptedFiles, spec, project, githubPush } = usePipelineState()
   const { startPipeline } = usePipeline()
 
   const [showContinue, setShowContinue]   = useState(false)
@@ -96,6 +96,34 @@ export function CompletePanel() {
               })}
             </div>
           </div>
+        )}
+
+        {/* GitHub push status */}
+        {githubPush && (
+          'error' in githubPush ? (
+            <div className="rounded-sm border border-red-900/50 bg-red-950/20 px-4 py-3">
+              <p className="font-mono text-[10px] text-red-400">Push failed: {githubPush.error}</p>
+            </div>
+          ) : (
+            <div className="rounded-sm border border-emerald-900/40 bg-emerald-950/10 px-4 py-3 space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-[10px] text-emerald-500">↑</span>
+                <span className="font-mono text-[10px] font-semibold text-zinc-200">Pushed to GitHub</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-[10px] text-zinc-600">{githubPush.branch}</span>
+                <span className="font-mono text-[10px] text-zinc-700">·</span>
+                <a
+                  href={githubPush.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-[10px] text-indigo-400 hover:text-indigo-300 underline"
+                >
+                  {githubPush.sha.slice(0, 7)}
+                </a>
+              </div>
+            </div>
+          )
         )}
 
         {/* Link to Files section */}

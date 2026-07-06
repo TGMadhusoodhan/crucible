@@ -20,8 +20,8 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     }
 
     const { sessionId, filename } = parsed.data
-    const { done } = await acceptOutputFile(sessionId, filename)
-    return NextResponse.json({ success: true, data: { done } })
+    const { done, push } = await acceptOutputFile(sessionId, filename)
+    return NextResponse.json({ success: true, data: { done, push } })
   } catch (err) {
     console.error('POST /api/pipeline/output-gate/accept:', err instanceof Error ? err.message : err)
     captureApiError(err, 'POST /api/pipeline/output-gate/accept')

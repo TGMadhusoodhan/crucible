@@ -839,3 +839,38 @@ Full rewrite of Phase 3 review/patch loop to fix convergence failures.
 
 ### Left Off At
 - tsc: 0 errors. 80/80 tests pass. All 9 changed files committed. PROMPT 10 not yet provided.
+
+## Session 2026-07-06 19:00
+### Completed
+- PROMPT 10: GitHub integration — connect a GitHub repo to a workspace and push accepted files automatically
+
+### Files Created
+- `src/lib/workspace/github.ts` — push mechanics: scrubToken, fetchGitHubUser, checkRepoWriteAccess, createGitHubRepo, pushWorkspace (git CLI only, token URL never persisted/logged)
+- `src/app/api/projects/[id]/push/route.ts` — POST endpoint for manual workspace push
+- `src/app/api/github/repos/route.ts` — POST endpoint to create a new private GitHub repo via PAT
+- `drizzle/0003_github_integration.sql` — migration: metadata on api_credentials, githubRepo/pushMode/branch on projects
+- `test/unit/github.test.ts` — 6 scrubToken tests covering exact replace, multi-occurrence, empty token, regex chars, URL segment
+
+### Files Modified
+- `src/lib/db/schema.ts` — metadata (JSON blob) on apiCredentials; githubRepo/githubPushMode/githubBranch on projects
+- `drizzle/meta/_journal.json` — added migration 0003 entry
+- `src/app/api/credentials/route.ts` — added 'github' credential provider; GitHub PAT validation stores login in metadata; GET exposes login field
+- `src/app/api/projects/[id]/route.ts` — added PATCH endpoint with repo validation (checks write access on link)
+- `src/app/api/pipeline/output-gate/accept/route.ts` — passes push result from acceptOutputFile back to client
+- `src/lib/pipeline/orchestrator.ts` — tryGitHubPush helper; loads githubPushMode at runPipeline start; per_file push after acceptCurrentFile; per_session push in acceptOutputFile
+- `src/types/index.ts` — github_push_success + github_push_failed SSEEvent entries
+- `src/store/index.ts` — githubPush state field; GITHUB_PUSH_SUCCESS + GITHUB_PUSH_FAILED actions + reducer cases
+- `src/hooks/usePipeline.ts` — SSE event dispatch for github_push_success and github_push_failed
+- `src/components/pipeline/CompletePanel.tsx` — push status display (SHA link, branch, error)
+- `src/components/shared/CredentialsManager.tsx` — GitHub PAT section with setup instructions, login name display
+- `src/app/(dashboard)/projects/page.tsx` — GitHub tab in project detail: repo linking, push mode selector, manual push button
+
+### Decisions Made
+- github not added to Provider type (it's a credential-only, not a pipeline adapter) — uses local CredentialProvider = Provider | 'github' in UI/API files
+- Token URL passed ONLY as git push target arg — never written to .git/config, never logged
+- scrubToken replaces all occurrences via regex (special chars escaped)
+- per_file push: SSE event emitted mid-pipeline; per_session push: returned in acceptOutputFile HTTP response (SSE stream closed by output gate)
+- Migration via drizzle migration folder (0003) — auto-applied on next startup
+
+### Left Off At
+- tsc: 0 errors. 86/86 tests pass. 15 changed files. Ready to commit. PROMPT 11 not yet provided.

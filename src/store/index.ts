@@ -78,6 +78,9 @@ export interface PipelineState {
   // Output (consensus-validated)
   output:            ConsensusOutput | null
 
+  // GitHub push status (per_file mode — populated via SSE; per_session via API response)
+  githubPush?:       { sha: string; branch: string; url: string } | { error: string }
+
   // UI state
   isStreaming:       boolean
   budget:            BudgetStatus | null
@@ -151,6 +154,8 @@ export type PipelineAction =
   | { type: 'RESTORE_OUTPUT';         output: ConsensusOutput; spec: SpecDocument | null }
   | { type: 'CLEAR_PROJECT' }
   | { type: 'RESET_SESSION' }
+  | { type: 'GITHUB_PUSH_SUCCESS';    sha: string; branch: string; url: string }
+  | { type: 'GITHUB_PUSH_FAILED';     message: string }
 
 // ─── Reducer ──────────────────────────────────────────────────────────────────
 
@@ -308,6 +313,12 @@ function reducer(state: PipelineState, action: PipelineAction): PipelineState {
 
     case 'RESET_SESSION':
       return { ...initialState, budget: state.budget }
+
+    case 'GITHUB_PUSH_SUCCESS':
+      return { ...state, githubPush: { sha: action.sha, branch: action.branch, url: action.url } }
+
+    case 'GITHUB_PUSH_FAILED':
+      return { ...state, githubPush: { error: action.message } }
 
     default:
       return state

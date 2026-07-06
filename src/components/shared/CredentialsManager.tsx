@@ -4,13 +4,16 @@ import { useCallback, useEffect, useState } from 'react'
 import { cn } from '@/lib/utils'
 import type { Provider } from '@/types'
 
-const PROVIDERS: Provider[] = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together', 'zai']
+// AI providers shown in the main credentials list
+const AI_PROVIDERS: Provider[] = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together', 'zai']
 
 // Providers hidden from the "add key" UI — adapters still work, existing
 // stored credentials still display so users can remove them if needed.
 const HIDDEN_PROVIDERS = new Set<Provider>(['mistral', 'openrouter', 'together'])
 
-const PROVIDER_LABELS: Record<Provider, string> = {
+type CredentialProvider = Provider | 'github'
+
+const PROVIDER_LABELS: Record<CredentialProvider, string> = {
   anthropic:  'Anthropic (Claude)',
   openai:     'OpenAI (GPT)',
   deepseek:   'DeepSeek',
@@ -20,21 +23,23 @@ const PROVIDER_LABELS: Record<Provider, string> = {
   groq:       'Groq',
   together:   'Together AI',
   zai:        'Z.ai (GLM)',
+  github:     'GitHub',
 }
 
-const PROVIDER_KEY_HINT: Partial<Record<Provider, string>> = {
+const PROVIDER_KEY_HINT: Partial<Record<CredentialProvider, string>> = {
   anthropic:  'sk-ant-…',
   openai:     'sk-…',
   deepseek:   'sk-…',
   google:     'AIza…',
   openrouter: 'sk-or-…',
   zai:        'your-api-key',
+  github:     'github_pat_… or ghp_…',
 }
 
-interface Credential { id: string; provider: string; isValid: boolean; createdAt: number }
+interface Credential { id: string; provider: string; isValid: boolean; createdAt: number; login?: string }
 
 interface AddKeyModalProps {
-  provider: Provider
+  provider: CredentialProvider
   onClose: () => void
   onSaved: () => void
 }
@@ -119,10 +124,82 @@ function AddKeyModal({ provider, onClose, onSaved }: AddKeyModalProps) {
   )
 }
 
+function GitHubCredential({
+  cred,
+  onAdd,
+  onDelete,
+}: {
+  cred:     Credential | undefined
+  onAdd:    () => void
+  onDelete: (id: string) => void
+}) {
+  return (
+    <div className="mt-8 space-y-4">
+      <div>
+        <h3 className="text-sm font-semibold text-zinc-100">GitHub</h3>
+        <p className="mt-1 text-xs text-zinc-500">
+          Connect a fine-grained Personal Access Token to push accepted files to your GitHub repos.
+        </p>
+      </div>
+
+      {/* Setup instructions */}
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3 space-y-1.5 text-[11px] text-zinc-500">
+        <p className="font-medium text-zinc-400">How to create a fine-grained PAT:</p>
+        <ol className="ml-3 list-decimal space-y-1">
+          <li>Go to <span className="font-mono text-zinc-400">github.com → Settings → Developer settings → Personal access tokens → Fine-grained tokens</span></li>
+          <li>Set expiration, then under <span className="font-mono text-zinc-400">Repository access</span> choose the repos Crucible can push to</li>
+          <li>Under <span className="font-mono text-zinc-400">Permissions → Repository permissions</span>: set <span className="font-mono text-zinc-400">Contents → Read and write</span></li>
+          <li>Add <span className="font-mono text-zinc-400">Administration → Read and write</span> only if you want Crucible to create new repos</li>
+        </ol>
+      </div>
+
+      {/* Credential row */}
+      <div className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
+        <div className="flex items-center gap-3">
+          <span className={cn(
+            'h-2 w-2 shrink-0 rounded-full',
+            cred?.isValid ? 'bg-emerald-500' :
+            cred          ? 'bg-red-500' :
+                            'bg-zinc-700',
+          )} />
+          <div>
+            <p className="text-sm font-medium text-zinc-200">GitHub PAT</p>
+            <p className="text-[11px] text-zinc-600">
+              {cred?.isValid && cred.login
+                ? `@${cred.login} · connected ${new Date(cred.createdAt).toLocaleDateString()}`
+                : cred?.isValid
+                ? `Connected · ${new Date(cred.createdAt).toLocaleDateString()}`
+                : cred
+                ? 'Token invalid — click Update to replace'
+                : 'Not connected'}
+            </p>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={onAdd}
+            className="rounded border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800 transition-colors"
+          >
+            {cred ? 'Update' : 'Connect'}
+          </button>
+          {cred && (
+            <button
+              onClick={() => onDelete(cred.id)}
+              className="rounded border border-zinc-800 px-3 py-1.5 text-xs text-zinc-600 hover:border-red-800 hover:text-red-500 transition-colors"
+            >
+              Remove
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function CredentialsManager() {
   const [credentials, setCredentials] = useState<Credential[]>([])
   const [loading, setLoading]         = useState(true)
-  const [adding, setAdding]           = useState<Provider | null>(null)
+  const [adding, setAdding]           = useState<CredentialProvider | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -165,7 +242,7 @@ export function CredentialsManager() {
         <p className="text-sm text-zinc-600">Loading…</p>
       ) : (
         <div className="space-y-2">
-          {PROVIDERS.filter((provider) => !HIDDEN_PROVIDERS.has(provider) || connectedMap.has(provider)).map((provider) => {
+          {AI_PROVIDERS.filter((provider) => !HIDDEN_PROVIDERS.has(provider) || connectedMap.has(provider)).map((provider) => {
             const cred = connectedMap.get(provider)
             return (
               <div
@@ -213,6 +290,9 @@ export function CredentialsManager() {
           })}
         </div>
       )}
+
+      {/* ─── GitHub section ──────────────────────────────────────────────────── */}
+      {!loading && <GitHubCredential cred={connectedMap.get('github')} onAdd={() => setAdding('github')} onDelete={handleDelete} />}
 
       {adding && (
         <AddKeyModal
