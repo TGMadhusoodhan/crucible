@@ -1,8 +1,12 @@
+import { eq } from 'drizzle-orm'
 import { NextResponse, type NextRequest } from 'next/server'
 import { z } from 'zod'
+import { db, schema } from '@/lib/db'
 import { readOutputFile, writeOutput } from '@/lib/memory/filesystem'
 import { getSessionState } from '@/lib/pipeline/orchestrator'
 import { getAdapter } from '@/lib/adapters'
+import { getFileCommitHash } from '@/lib/workspace'
+import { resolveInWorkspace } from '@/lib/workspace/paths'
 import type { ApiResponse } from '@/types'
 
 const postSchema = z.object({
@@ -13,12 +17,29 @@ const postSchema = z.object({
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ projectId: string; filepath: string[] }> },
-): Promise<NextResponse<ApiResponse<{ content: string }>>> {
+): Promise<NextResponse<ApiResponse<{ content: string; commitHash?: string | null; workspacePath?: string | null }>>> {
   try {
     const { projectId, filepath } = await params
     const filename = filepath.join('/')
     const content  = readOutputFile(projectId, filename)
-    return NextResponse.json({ success: true, data: { content } })
+
+    const [projectRow] = await db
+      .select({ workspaceDir: schema.projects.workspaceDir })
+      .from(schema.projects)
+      .where(eq(schema.projects.id, projectId))
+      .limit(1)
+    const workspaceDir = projectRow?.workspaceDir ?? null
+
+    let commitHash:   string | null = null
+    let workspacePath: string | null = null
+    if (workspaceDir) {
+      try {
+        workspacePath = resolveInWorkspace(workspaceDir, filename)
+        commitHash    = await getFileCommitHash(workspaceDir, filename)
+      } catch { /* git unavailable or path invalid */ }
+    }
+
+    return NextResponse.json({ success: true, data: { content, commitHash, workspacePath } })
   } catch (err) {
     return NextResponse.json({ success: false, error: err instanceof Error ? err.message : 'Not found' }, { status: 404 })
   }

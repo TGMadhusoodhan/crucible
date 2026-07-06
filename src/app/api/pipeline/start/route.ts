@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { db, schema } from '@/lib/db'
 import { decrypt } from '@/lib/crypto'
 import { createSession } from '@/lib/pipeline/orchestrator'
+import { prepareWorkspaceForSession } from '@/lib/workspace'
 import { captureApiError } from '@/lib/sentry'
 import type { ApiResponse, Provider } from '@/types'
 
@@ -63,11 +64,18 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       )
     }
 
-    const [coderApiKey, r1ApiKey, r2ApiKey] = await Promise.all([
-      getApiKey(CODER_PROVIDER),
-      getApiKey(r1Provider),
-      getApiKey(r2Provider),
+    const [[projectRow], [coderApiKey, r1ApiKey, r2ApiKey]] = await Promise.all([
+      db.select({ workspaceDir: schema.projects.workspaceDir })
+        .from(schema.projects)
+        .where(eq(schema.projects.id, projectId))
+        .limit(1),
+      Promise.all([
+        getApiKey(CODER_PROVIDER),
+        getApiKey(r1Provider),
+        getApiKey(r2Provider),
+      ]),
     ])
+    const workspaceDir = projectRow?.workspaceDir ?? null
 
     if (!coderApiKey) {
       return NextResponse.json(
@@ -90,10 +98,15 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       )
     }
 
+    if (workspaceDir) {
+      await prepareWorkspaceForSession(workspaceDir)
+    }
+
     const sessionId = await createSession({
       userId,
       projectId,
       taskDescription,
+      workspaceDir,
       config: {
         coderProvider: CODER_PROVIDER,
         coderModelId:  CODER_MODEL_ID,

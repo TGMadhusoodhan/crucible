@@ -5,9 +5,10 @@ import { usePipelineState } from '@/store'
 import { cn } from '@/lib/utils'
 
 interface FileEntry {
-  path: string
-  size: number
-  updatedAt: number
+  path:        string
+  size:        number
+  updatedAt:   number
+  inWorkspace: boolean
 }
 
 // ─── Tree builder ─────────────────────────────────────────────────────────────
@@ -44,14 +45,15 @@ function extColor(ext: string): string {
 // ─── Tree rows ────────────────────────────────────────────────────────────────
 
 function TreeRows({
-  nodes, depth, pathPrefix, activeFile, onSelect, ancestors = [],
+  nodes, depth, pathPrefix, activeFile, onSelect, ancestors = [], writtenFiles = new Set(),
 }: {
-  nodes:      Record<string, TreeNode>
-  depth:      number
-  pathPrefix: string
-  activeFile: string | null
-  onSelect:   (path: string) => void
-  ancestors?: boolean[]  // true = ancestor was last child at that depth
+  nodes:        Record<string, TreeNode>
+  depth:        number
+  pathPrefix:   string
+  activeFile:   string | null
+  onSelect:     (path: string) => void
+  ancestors?:   boolean[]  // true = ancestor was last child at that depth
+  writtenFiles?: Set<string>
 }) {
   const entries = Object.entries(nodes)
   const [openSet, setOpenSet] = useState<Set<string>>(() => {
@@ -63,12 +65,13 @@ function TreeRows({
   return (
     <>
       {entries.map(([name, node], idx) => {
-        const isLast   = idx === entries.length - 1
-        const isDir    = node !== null
-        const fullPath = pathPrefix ? `${pathPrefix}/${name}` : name
-        const isActive = !isDir && activeFile === fullPath
-        const ext      = isDir ? '' : (name.split('.').pop() ?? '')
-        const isOpen   = isDir && openSet.has(name)
+        const isLast    = idx === entries.length - 1
+        const isDir     = node !== null
+        const fullPath  = pathPrefix ? `${pathPrefix}/${name}` : name
+        const isActive  = !isDir && activeFile === fullPath
+        const ext       = isDir ? '' : (name.split('.').pop() ?? '')
+        const isOpen    = isDir && openSet.has(name)
+        const isWritten = !isDir && writtenFiles.has(fullPath)
 
         // Vertical pipe lines for parent levels
         const leadingChars = ancestors.map(wasLast => wasLast ? '   ' : '│  ').join('')
@@ -120,6 +123,15 @@ function TreeRows({
                     {name.replace(/\.[^.]+$/, '')}
                     <span className={cn('font-mono', extColor(ext))}>{ext ? `.${ext}` : ''}</span>
                   </span>
+                  {isWritten && (
+                    <span
+                      className="ml-auto shrink-0 font-mono text-[8px] text-emerald-600 select-none"
+                      title="Written to workspace"
+                      aria-label="Written to workspace"
+                    >
+                      ✓
+                    </span>
+                  )}
                 </>
               )}
             </button>
@@ -132,6 +144,7 @@ function TreeRows({
                 activeFile={activeFile}
                 onSelect={onSelect}
                 ancestors={[...ancestors, isLast]}
+                writtenFiles={writtenFiles}
               />
             )}
           </div>
@@ -145,14 +158,17 @@ function TreeRows({
 
 export function FilesSection() {
   const { project, sessionId } = usePipelineState()
-  const [files,       setFiles]       = useState<FileEntry[]>([])
-  const [activeFile,  setActiveFile]  = useState<string | null>(null)
-  const [content,     setContent]     = useState<string | null>(null)
-  const [loading,     setLoading]     = useState(false)
-  const [chatPrompt,  setChatPrompt]  = useState('')
-  const [chatSending, setChatSending] = useState(false)
-  const [chatError,   setChatError]   = useState<string | null>(null)
-  const [downloaded,  setDownloaded]  = useState(false)
+  const [files,        setFiles]        = useState<FileEntry[]>([])
+  const [workspaceDir, setWorkspaceDir] = useState<string | null>(null)
+  const [activeFile,   setActiveFile]   = useState<string | null>(null)
+  const [content,      setContent]      = useState<string | null>(null)
+  const [commitHash,   setCommitHash]   = useState<string | null>(null)
+  const [workspacePath, setWorkspacePath] = useState<string | null>(null)
+  const [loading,      setLoading]      = useState(false)
+  const [chatPrompt,   setChatPrompt]   = useState('')
+  const [chatSending,  setChatSending]  = useState(false)
+  const [chatError,    setChatError]    = useState<string | null>(null)
+  const [downloaded,   setDownloaded]   = useState(false)
   const chatLabelId = useId()
 
   const projectId = project?.id
@@ -161,8 +177,11 @@ export function FilesSection() {
     if (!projectId) return
     try {
       const res  = await fetch(`/api/files/${projectId}`)
-      const data = await res.json() as { success: boolean; data?: { files: FileEntry[] } }
-      if (data.success && data.data) setFiles(data.data.files)
+      const data = await res.json() as { success: boolean; data?: { files: FileEntry[]; workspaceDir: string | null } }
+      if (data.success && data.data) {
+        setFiles(data.data.files)
+        setWorkspaceDir(data.data.workspaceDir)
+      }
     } catch { /* silent */ }
   }, [projectId])
 
@@ -176,13 +195,22 @@ export function FilesSection() {
     if (activeFile === filepath) return
     setActiveFile(filepath)
     setContent(null)
+    setCommitHash(null)
+    setWorkspacePath(null)
     setChatError(null)
     if (!projectId) return
     setLoading(true)
     try {
       const res  = await fetch(`/api/files/${projectId}/${filepath}`)
-      const data = await res.json() as { success: boolean; data?: { content: string } }
-      if (data.success && data.data) setContent(data.data.content)
+      const data = await res.json() as {
+        success: boolean
+        data?: { content: string; commitHash?: string | null; workspacePath?: string | null }
+      }
+      if (data.success && data.data) {
+        setContent(data.data.content)
+        setCommitHash(data.data.commitHash ?? null)
+        setWorkspacePath(data.data.workspacePath ?? null)
+      }
     } catch { /* silent */ } finally { setLoading(false) }
   }
 
@@ -220,6 +248,7 @@ export function FilesSection() {
   }
 
   const tree            = buildTree(files.map(f => f.path))
+  const writtenFiles    = new Set(files.filter(f => f.inWorkspace).map(f => f.path))
   const activeBasename  = activeFile?.split('/').pop() ?? ''
   const activeDirPart   = activeFile ? activeFile.split('/').slice(0, -1).join('/') : ''
   const activeLineCount = content ? content.split('\n').length : 0
@@ -232,20 +261,30 @@ export function FilesSection() {
       {/* ── Left: file tree ────────────────────────────────────────────── */}
       <nav aria-label="Project files" className="w-52 shrink-0 border-r border-zinc-800 flex flex-col">
 
-        <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2.5">
-          <span className="font-mono text-[9px] font-semibold uppercase tracking-widest text-zinc-600">
-            Files
-            {files.length > 0 && (
-              <span className="ml-1.5 text-zinc-700">({files.length})</span>
-            )}
-          </span>
-          <button
-            onClick={fetchFiles}
-            aria-label="Refresh file list"
-            className="font-mono text-[10px] text-zinc-700 hover:text-zinc-400 transition-colors"
-          >
-            ↻
-          </button>
+        <div className="border-b border-zinc-800 px-4 py-2.5 space-y-1">
+          <div className="flex items-center justify-between">
+            <span className="font-mono text-[9px] font-semibold uppercase tracking-widest text-zinc-600">
+              Files
+              {files.length > 0 && (
+                <span className="ml-1.5 text-zinc-700">({files.length})</span>
+              )}
+            </span>
+            <button
+              onClick={fetchFiles}
+              aria-label="Refresh file list"
+              className="font-mono text-[10px] text-zinc-700 hover:text-zinc-400 transition-colors"
+            >
+              ↻
+            </button>
+          </div>
+          {workspaceDir && (
+            <p
+              className="font-mono text-[8px] text-emerald-800 truncate"
+              title={workspaceDir}
+            >
+              ⇒ {workspaceDir}
+            </p>
+          )}
         </div>
 
         {files.length === 0 ? (
@@ -265,6 +304,7 @@ export function FilesSection() {
               pathPrefix=""
               activeFile={activeFile}
               onSelect={selectFile}
+              writtenFiles={writtenFiles}
             />
           </div>
         )}
@@ -298,11 +338,26 @@ export function FilesSection() {
                   {downloaded ? '✓ saved' : '↓ download'}
                 </button>
               </div>
-              {activeExt && (
-                <span className={cn('inline-block rounded-sm border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider border-zinc-800', extColor(activeExt))}>
-                  {activeExt}
-                </span>
-              )}
+              <div className="flex items-center gap-3 flex-wrap">
+                {activeExt && (
+                  <span className={cn('inline-block rounded-sm border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider border-zinc-800', extColor(activeExt))}>
+                    {activeExt}
+                  </span>
+                )}
+                {workspacePath && (
+                  <span
+                    className="font-mono text-[9px] text-zinc-600 truncate max-w-xs"
+                    title={workspacePath}
+                  >
+                    {workspacePath}
+                  </span>
+                )}
+                {commitHash && (
+                  <span className="font-mono text-[9px] text-emerald-700 shrink-0">
+                    written ✓ {commitHash}
+                  </span>
+                )}
+              </div>
             </div>
 
             {/* Code viewer */}

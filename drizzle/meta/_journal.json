@@ -15,6 +15,13 @@
       "when": 1783349702481,
       "tag": "0001_conscious_speedball",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1783400000000,
+      "tag": "0002_workspace_dir",
+      "breakpoints": true
     }
   ]
 }

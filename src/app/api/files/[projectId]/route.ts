@@ -1,15 +1,19 @@
+import { eq } from 'drizzle-orm'
 import { NextResponse, type NextRequest } from 'next/server'
 import fs   from 'fs'
 import path from 'path'
+import { db, schema } from '@/lib/db'
 import { listOutputFiles, writeOutput } from '@/lib/memory/filesystem'
+import { resolveInWorkspace } from '@/lib/workspace/paths'
 import type { ApiResponse } from '@/types'
 
 const getDataDir = () => process.env.DATA_DIR ?? './data'
 
 interface FileEntry {
-  path: string
-  size: number
-  updatedAt: number
+  path:        string
+  size:        number
+  updatedAt:   number
+  inWorkspace: boolean
 }
 
 // When the output/ directory is empty but output.json exists (e.g. pipeline
@@ -41,10 +45,18 @@ function hydrateOutputDirIfNeeded(projectId: string): void {
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ projectId: string }> },
-): Promise<NextResponse<ApiResponse<{ files: FileEntry[] }>>> {
+): Promise<NextResponse<ApiResponse<{ files: FileEntry[]; workspaceDir: string | null }>>> {
   try {
     const { projectId } = await params
     if (!projectId) return NextResponse.json({ success: false, error: 'Missing projectId' }, { status: 400 })
+
+    // Load workspace dir for this project
+    const [projectRow] = await db
+      .select({ workspaceDir: schema.projects.workspaceDir })
+      .from(schema.projects)
+      .where(eq(schema.projects.id, projectId))
+      .limit(1)
+    const workspaceDir = projectRow?.workspaceDir ?? null
 
     // Ensure files are on disk (hydrate from output.json if gate was never completed)
     hydrateOutputDirIfNeeded(projectId)
@@ -60,10 +72,19 @@ export async function GET(
         size      = stat.size
         updatedAt = stat.mtimeMs
       } catch { /* file may not exist */ }
-      return { path: name, size, updatedAt }
+
+      let inWorkspace = false
+      if (workspaceDir) {
+        try {
+          const wsPath = resolveInWorkspace(workspaceDir, name)
+          inWorkspace  = fs.existsSync(wsPath)
+        } catch { /* path traversal — treat as not in workspace */ }
+      }
+
+      return { path: name, size, updatedAt, inWorkspace }
     })
 
-    return NextResponse.json({ success: true, data: { files } })
+    return NextResponse.json({ success: true, data: { files, workspaceDir } })
   } catch (err) {
     return NextResponse.json({ success: false, error: err instanceof Error ? err.message : 'Internal server error' }, { status: 500 })
   }

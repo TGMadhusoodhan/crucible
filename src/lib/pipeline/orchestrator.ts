@@ -12,6 +12,7 @@ import { capturePipelineError } from '@/lib/sentry'
 import { generateId } from '@/lib/utils'
 import { estimateTokens } from '@/lib/utils/tokens'
 import { mergeReviewHunks, applyResolvedHunks } from '@/lib/utils/hunk-merge'
+import { prepareWorkspaceForSession, writeAcceptedFile } from '@/lib/workspace'
 import { runPhase0Context }        from './phase0-context'
 import { runPhase1Thinking }       from './phase1-thinking'
 import { runPhase1_5Alignment }    from './phase1-5-alignment'
@@ -237,6 +238,7 @@ export interface StartPipelineParams {
   config:          PipelineConfig
   contextInput?:   ContextInput
   budgetMode?:     BudgetMode
+  workspaceDir?:   string | null
 }
 
 export async function createSession(params: StartPipelineParams): Promise<string> {
@@ -263,6 +265,7 @@ export async function createSession(params: StartPipelineParams): Promise<string
     userId:              params.userId,
     phase:               'phase1_thinking',
     config:              params.config,
+    workspaceDir:        params.workspaceDir ?? null,
 
     currentFileIdx:      0,
     currentFilename:     null,
@@ -525,6 +528,13 @@ export async function applyOutputFix(
 
   state.acceptedFiles[filename] = code
   await saveSessionState(state)
+
+  if (state.workspaceDir) {
+    writeAcceptedFile(state.workspaceDir, filename, code, sessionId, state.round).catch(err => {
+      console.warn('[workspace] fix write failed for', filename, ':', err instanceof Error ? err.message : err)
+    })
+  }
+
   return { code, modelId: coderAdapter.getModelId() }
 }
 
@@ -909,6 +919,11 @@ export async function runPipeline(
       phase: 'phase3_reviewing', actor: 'system',
       summary: `File accepted: ${fname}`,
     })
+    if (state!.workspaceDir) {
+      writeAcceptedFile(state!.workspaceDir, fname, code, sessionId, state!.round).catch(err => {
+        console.warn('[workspace] write failed for', fname, ':', err instanceof Error ? err.message : err)
+      })
+    }
   }
 
   async function advanceToNextFile(): Promise<boolean> {

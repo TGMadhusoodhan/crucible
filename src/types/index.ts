@@ -484,12 +484,13 @@ export interface PipelineConfig {
 }
 
 export interface PipelineSessionState {
-  sessionId:   string
-  projectId:   string
-  userId:      string
-  phase:       PipelinePhase
+  sessionId:    string
+  projectId:    string
+  userId:       string
+  phase:        PipelinePhase
   previousPhase?: PipelinePhase
-  config:      PipelineConfig
+  config:       PipelineConfig
+  workspaceDir?: string | null
 
   // Per-file loop tracking
   currentFileIdx:    number
