@@ -128,11 +128,12 @@ function toResolved(
   conflict: HunkConflict,
 ): ResolvedHunk {
   return {
-    filename:   conflict.filename,
-    line_start: conflict.line_start,
-    line_end:   conflict.line_end,
-    new_code:   hunk.fixed_code,
+    filename:      conflict.filename,
+    line_start:    conflict.line_start,
+    line_end:      conflict.line_end,
+    original_code: conflict.original_code,
+    new_code:      hunk.fixed_code,
     source,
-    flag_ids:   [conflict.r1_hunk.id, conflict.r2_hunk.id],
+    flag_ids:      [conflict.r1_hunk.id, conflict.r2_hunk.id],
   }
 }

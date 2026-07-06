@@ -8,8 +8,10 @@ import type {
   FileDefinition,
   FileManifest,
   HunkConflict,
+  HunkVerdict,
   ModelAdapter,
   PipelinePhase,
+  PreviousHunkRecord,
   Provider,
   Question,
   ResolvedHunk,
@@ -195,11 +197,10 @@ RULES:
 - Use correct relative import paths from the manifest
 - Production quality: error handling, edge cases, type safety`
 
-export const REVIEW_AND_PATCH_SYSTEM_PROMPT = `You are a code reviewer.
-For every issue you find, you MUST provide a complete fix.
-Never output a flag without its replacement code.
+export const REVIEW_AND_PATCH_SYSTEM_PROMPT = `You are a code reviewer in a multi-model quality gate.
+For every issue you find, you MUST provide a complete fix with an exact anchor.
 
-OUTPUT: JSON array of ReviewHunk objects. Empty array [] if code is clean.
+OUTPUT: JSON array only. Empty array [] if no issues.
 No preamble. No markdown fences.
 
 [{
@@ -207,9 +208,10 @@ No preamble. No markdown fences.
   "filename": "src/file.ts",
   "line_start": 10,
   "line_end": 20,
+  "original_code": "EXACT verbatim text from the file that you are replacing — copy character-for-character including all whitespace and indentation. Minimum 3 lines, or must be unique in the file if shorter.",
+  "fixed_code": "complete replacement for original_code — same indentation, correct syntax",
   "severity": "HIGH" | "MEDIUM" | "LOW",
   "issue": "what is wrong — one sentence",
-  "fixed_code": "complete replacement code for those exact lines",
   "category": "logic|security|performance|correctness|missing_implementation|edge_case|contract_violation"
 }]
 
@@ -218,11 +220,59 @@ SEVERITY:
 - MEDIUM: Suboptimal but working, missing error handling
 - LOW:    Style, naming, minor improvement
 
-fixed_code rules:
-- Must be a drop-in replacement for EXACTLY lines line_start to line_end
-- No surrounding context lines — only the replacement
-- Maintain the same indentation level as the original
-- Must not break imports or exports defined in the manifest`
+CRITICAL RULES FOR original_code:
+- Copy it EXACTLY from the file, character-for-character
+- Include ALL indentation and blank lines — do NOT trim
+- It MUST appear verbatim in the file. If it does not match exactly, your fix is silently discarded
+- Line numbers (line_start, line_end) are display hints only — do NOT include them in original_code or fixed_code
+- fixed_code must be a complete replacement for original_code — same scope, correct indentation`
+
+export const REVIEW_AND_PATCH_REVERIFY_SYSTEM_PROMPT = `You are re-verifying a file after patches were applied in a previous round.
+Your job: confirm which issues were fixed, and flag any NEW high-severity issues.
+
+OUTPUT: JSON object only. No preamble. No markdown fences.
+
+{
+  "verdicts": [
+    { "id": "prev_hunk_id", "status": "FIXED" },
+    {
+      "id": "prev_hunk_id",
+      "status": "NOT_FIXED",
+      "hunk": {
+        "id": "new_unique_id",
+        "filename": "src/file.ts",
+        "line_start": 10,
+        "line_end": 20,
+        "original_code": "EXACT verbatim text from the CURRENT file to replace",
+        "fixed_code": "replacement code",
+        "severity": "HIGH",
+        "issue": "what remains wrong",
+        "category": "logic|security|performance|correctness|missing_implementation|edge_case|contract_violation"
+      }
+    }
+  ],
+  "new_issues": [
+    {
+      "id": "unique_id",
+      "filename": "src/file.ts",
+      "line_start": 30,
+      "line_end": 35,
+      "original_code": "EXACT verbatim text from the CURRENT file",
+      "fixed_code": "replacement code",
+      "severity": "HIGH",
+      "issue": "what is wrong",
+      "category": "correctness"
+    }
+  ]
+}
+
+RULES:
+- Output a verdict for EVERY previous issue ID provided
+- Include "hunk" ONLY for NOT_FIXED verdicts
+- Do NOT re-report MEDIUM/LOW issues from previous rounds
+- Only flag genuinely new HIGH issues in new_issues
+- original_code must appear verbatim in the CURRENT (patched) file
+- Line numbers are display hints only — do NOT include them in original_code or fixed_code`
 
 export const CROSS_REVIEW_SYSTEM_PROMPT = `You are evaluating a
 competing fix from another reviewer for the same code location.
@@ -460,13 +510,147 @@ export function parseThinkingOutput(text: string, provider: Provider, modelId: s
   return { ...result.data, provider, model_id: modelId, tokens_used: tokensUsed }
 }
 
-export function parseReviewHunks(text: string, round: number): ReviewHunk[] {
+export function parseReviewHunks(
+  text:  string,
+  round: number,
+  code?: string,  // the file content — used to validate original_code anchors
+): { hunks: ReviewHunk[]; droppedCount: number; droppedReasons: string[] } {
   const raw = parseJSON<unknown[]>(text, 'reviewAndPatch')
-  if (!Array.isArray(raw)) return []
-  return reviewHunksSchema.parse(raw).map((h, i) => ({
+  if (!Array.isArray(raw)) return { hunks: [], droppedCount: 0, droppedReasons: [] }
+
+  const parsed = reviewHunksSchema.parse(raw).map((h, i) => ({
     ...h,
     id: h.id || `h_${round}_${String(i + 1).padStart(3, '0')}`,
   }))
+
+  if (!code) return { hunks: parsed, droppedCount: 0, droppedReasons: [] }
+
+  const valid:   ReviewHunk[] = []
+  const dropped: string[]     = []
+
+  for (const hunk of parsed) {
+    const anchor = hunk.original_code?.trim()
+    if (!anchor) {
+      // No anchor provided — keep hunk but rely on line-hint fallback apply
+      valid.push(hunk)
+      continue
+    }
+    // Exact match
+    if (code.includes(hunk.original_code!)) {
+      valid.push(hunk)
+      continue
+    }
+    // Whitespace-normalized match (handles trailing-space differences)
+    const normalizedCode   = code.split('\n').map(l => l.trimEnd()).join('\n')
+    const normalizedAnchor = hunk.original_code!.split('\n').map(l => l.trimEnd()).join('\n')
+    if (normalizedCode.includes(normalizedAnchor)) {
+      valid.push(hunk)
+      continue
+    }
+    // No match — drop the hunk
+    const reason = `hunk ${hunk.id} (${hunk.filename} ~L${hunk.line_start}): original_code not found in file`
+    console.warn(`[reviewAndPatch] dropped hunk — ${reason}`)
+    dropped.push(reason)
+  }
+
+  return { hunks: valid, droppedCount: dropped.length, droppedReasons: dropped }
+}
+
+// Parse a re-review response ({ verdicts, new_issues }) and return the subset
+// of hunks that still need fixing (NOT_FIXED verdict hunks + new HIGH issues).
+export function parseReReviewResponse(
+  text:                string,
+  previousHunkRecords: PreviousHunkRecord[],
+  code:                string,
+  round:               number,
+): { hunks: ReviewHunk[]; droppedCount: number; droppedReasons: string[] } {
+  const raw = parseJSON<Record<string, unknown>>(text, 'reReview')
+  if (!raw) return { hunks: [], droppedCount: 0, droppedReasons: [] }
+
+  const verdicts: HunkVerdict[] = Array.isArray(raw.verdicts)
+    ? (raw.verdicts as unknown[]).map((v): HunkVerdict => {
+        const obj = v as Record<string, unknown>
+        return {
+          id:   String(obj.id ?? ''),
+          status: obj.status === 'FIXED' ? 'FIXED' : 'NOT_FIXED',
+          hunk: obj.hunk ? (obj.hunk as ReviewHunk) : undefined,
+        }
+      })
+    : []
+
+  const newIssuesRaw: unknown[] = Array.isArray(raw.new_issues) ? raw.new_issues : []
+
+  const resultHunks: ReviewHunk[] = []
+
+  // Collect NOT_FIXED hunks (with updated fix from the verdict if provided)
+  for (const verdict of verdicts) {
+    if (verdict.status === 'NOT_FIXED') {
+      if (verdict.hunk) {
+        resultHunks.push({ ...verdict.hunk, id: verdict.hunk.id || `rev_${verdict.id}_${round}` })
+      } else {
+        // Model said NOT_FIXED but didn't provide a new hunk — find the original record
+        const orig = previousHunkRecords.find(r => r.id === verdict.id)
+        if (orig) {
+          resultHunks.push({
+            id:            `rev_${verdict.id}_${round}`,
+            filename:      'unknown',
+            line_start:    1,
+            line_end:      1,
+            severity:      'HIGH',
+            issue:         orig.issue,
+            original_code: orig.original_code,
+            fixed_code:    '',
+            category:      'correctness',
+          })
+        }
+      }
+    }
+  }
+
+  // Mark any previous issue not mentioned in verdicts as still outstanding
+  for (const record of previousHunkRecords) {
+    const mentioned = verdicts.some(v => v.id === record.id)
+    if (!mentioned) {
+      resultHunks.push({
+        id:            `unverified_${record.id}_${round}`,
+        filename:      'unknown',
+        line_start:    1,
+        line_end:      1,
+        severity:      'HIGH',
+        issue:         record.issue,
+        original_code: record.original_code,
+        fixed_code:    '',
+        category:      'correctness',
+      })
+    }
+  }
+
+  // Collect new HIGH issues — validate directly without a JSON round-trip
+  const droppedReasons: string[] = []
+  let droppedCount = 0
+  const rawNewHunks = reviewHunksSchema.parse(newIssuesRaw).map((h, i) => ({
+    ...h,
+    id: h.id || `new_${round}_${String(i + 1).padStart(3, '0')}`,
+  }))
+  for (const h of rawNewHunks) {
+    if (h.severity !== 'HIGH') continue
+    const anchor = h.original_code?.trim()
+    if (anchor) {
+      const inFile = code.includes(h.original_code!)
+        || code.split('\n').map(l => l.trimEnd()).join('\n')
+             .includes(h.original_code!.split('\n').map(l => l.trimEnd()).join('\n'))
+      if (!inFile) {
+        const reason = `new_issue ${h.id}: original_code not found in file`
+        console.warn(`[reReview] dropped — ${reason}`)
+        droppedReasons.push(reason)
+        droppedCount++
+        continue
+      }
+    }
+    resultHunks.push(h)
+  }
+
+  return { hunks: resultHunks, droppedCount, droppedReasons }
 }
 
 export function parseCrossReviewResponse(
@@ -754,13 +938,14 @@ export abstract class BaseAdapter implements ModelAdapter {
   // ─── Phase 3: DeepSeek generates the current file ──────────────────────────
 
   async generate(
-    filename:       string,
-    fileDef:        FileDefinition,
-    manifest:       FileManifest,
-    spec:           SpecDocument,
-    generatedSoFar: Record<string, string>,
-    contextText:    string | undefined,
-    onToken:        (token: string) => void,
+    filename:          string,
+    fileDef:           FileDefinition,
+    manifest:          FileManifest,
+    spec:              SpecDocument,
+    generatedSoFar:    Record<string, string>,
+    contextText:       string | undefined,
+    onToken:           (token: string) => void,
+    regenerationHint?: string,
   ): Promise<{ code: string; tokensOut: number }> {
     const directDeps = Object.keys(fileDef.imports)
       .filter(dep => generatedSoFar[dep])
@@ -779,7 +964,8 @@ export abstract class BaseAdapter implements ModelAdapter {
       '\nSPECIFICATION:',
       JSON.stringify(spec, null, 2),
       contextText ? `\nCODEBASE CONTEXT:\n${contextText}` : '',
-      depContext   ? `\nGENERATED DEPENDENCIES:\n${depContext}` : '',
+      depContext         ? `\nGENERATED DEPENDENCIES:\n${depContext}` : '',
+      regenerationHint  ? `\nREGENERATION GUIDANCE — avoid these specific defects:\n${regenerationHint}` : '',
     ].filter(Boolean).join('\n')
 
     // Use streaming — follow the same pattern as the existing generate() method
@@ -799,31 +985,62 @@ export abstract class BaseAdapter implements ModelAdapter {
     return { code: clean, tokensOut: estimateTokens(clean) }
   }
 
-  // ─── Phase 3: R1/R2 review the file and produce drop-in fix hunks ──────────
+  // ─── Phase 3: R1/R2 review the file and produce anchor-based fix hunks ──────
+  // Round 1 → full initial review (REVIEW_AND_PATCH_SYSTEM_PROMPT).
+  // Round > 1 → re-review mode: returns FIXED/NOT_FIXED verdicts + new HIGH issues only.
 
   async reviewAndPatch(
-    filename:       string,
-    code:           string,
-    spec:           SpecDocument,
-    manifest:       FileManifest,
-    round:          number,
-    previousHunks?: ReviewHunk[],
-  ): Promise<ReviewHunk[]> {
-    const fileDef   = manifest.files.find(f => f.filename === filename)
-    const prevBlock = previousHunks?.length
-      ? `\nPREVIOUS UNRESOLVED ISSUES (focus on these):\n${JSON.stringify(previousHunks.map(h => ({ id: h.id, issue: h.issue })), null, 2)}`
+    filename:              string,
+    code:                  string,
+    spec:                  SpecDocument,
+    manifest:              FileManifest,
+    round:                 number,
+    previousHunkRecords?:  PreviousHunkRecord[],
+    compilerErrors?:       string[],
+  ): Promise<{ hunks: ReviewHunk[]; droppedCount: number }> {
+    const fileDef = manifest.files.find(f => f.filename === filename)
+
+    // Send code with line-number prefix so hints are grounded (display only)
+    const numberedCode = code.split('\n')
+      .map((line, i) => `${String(i + 1).padStart(4, ' ')}|  ${line}`)
+      .join('\n')
+
+    const compilerBlock = compilerErrors?.length
+      ? `\nCOMPILER ERRORS (fix these first — ground truth, not opinions):\n${compilerErrors.join('\n')}`
       : ''
-    const userMsg = [
-      `FILE: ${filename}`,
-      `PURPOSE: ${fileDef?.purpose ?? ''}`,
-      `EXPECTED EXPORTS: ${fileDef?.exports.join(', ') ?? ''}`,
-      '\nCODE:\n' + code,
-      '\nSPECIFICATION:\n' + JSON.stringify(spec, null, 2),
-      `\nRound ${round}/3.${prevBlock}`,
-    ].join('\n')
+
     try {
-      const raw = await this.completeNonStreaming(REVIEW_AND_PATCH_SYSTEM_PROMPT, userMsg)
-      return parseReviewHunks(raw, round)
+      if (round === 1 || !previousHunkRecords?.length) {
+        // ── Initial review ──────────────────────────────────────────────────
+        const userMsg = [
+          `FILE: ${filename}`,
+          `PURPOSE: ${fileDef?.purpose ?? ''}`,
+          `EXPECTED EXPORTS: ${fileDef?.exports.join(', ') ?? ''}`,
+          compilerBlock,
+          '\nCODE (line numbers are display-only — do NOT include them in original_code/fixed_code):\n' + numberedCode,
+          '\nSPECIFICATION:\n' + JSON.stringify(spec, null, 2),
+        ].filter(Boolean).join('\n')
+        const raw = await this.completeNonStreaming(REVIEW_AND_PATCH_SYSTEM_PROMPT, userMsg)
+        const { hunks, droppedCount } = parseReviewHunks(raw, round, code)
+        return { hunks, droppedCount }
+      } else {
+        // ── Re-review mode (round > 1) ──────────────────────────────────────
+        const prevBlock = previousHunkRecords.map(r =>
+          `  { "id": "${r.id}", "issue": "${r.issue}", "original_code": ${JSON.stringify(r.original_code)}, "fixed_code": ${JSON.stringify(r.fixed_code)} }`
+        ).join(',\n')
+        const userMsg = [
+          `FILE: ${filename} — RE-REVIEW ROUND ${round}`,
+          `PURPOSE: ${fileDef?.purpose ?? ''}`,
+          compilerBlock,
+          '\nPREVIOUS ISSUES APPLIED (issue each a FIXED/NOT_FIXED verdict):',
+          `[\n${prevBlock}\n]`,
+          '\nCURRENT FILE (after patches — line numbers are display-only):\n' + numberedCode,
+          '\nSPECIFICATION:\n' + JSON.stringify(spec, null, 2),
+        ].filter(Boolean).join('\n')
+        const raw = await this.completeNonStreaming(REVIEW_AND_PATCH_REVERIFY_SYSTEM_PROMPT, userMsg)
+        const { hunks, droppedCount, droppedReasons } = parseReReviewResponse(raw, previousHunkRecords, code, round)
+        return { hunks, droppedCount: droppedCount + droppedReasons.length }
+      }
     } catch (err) {
       throw this.wrapPhaseError(err, `reviewAndPatch:${filename}:round${round}`)
     }

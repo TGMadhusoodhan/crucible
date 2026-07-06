@@ -216,33 +216,52 @@ export type ReviewFlagCategory =
   | 'missing_implementation' | 'edge_case' | 'contract_violation'
 
 export interface ReviewHunk {
-  id:          string
-  filename:    string
-  line_start:  number
-  line_end:    number
-  severity:    'HIGH' | 'MEDIUM' | 'LOW'
-  issue:       string        // what is wrong
-  fixed_code:  string        // drop-in replacement for those exact lines
-  category:    ReviewFlagCategory
-  source?:     'R1' | 'R2' | 'both'
-  confirmed?:  boolean
+  id:             string
+  filename:       string
+  line_start:     number   // display hint only — approximate line
+  line_end:       number   // display hint only — approximate line
+  severity:       'HIGH' | 'MEDIUM' | 'LOW'
+  issue:          string        // what is wrong
+  original_code?: string        // verbatim text to replace (anchor for deterministic apply)
+  fixed_code:     string        // replacement — same scope as original_code
+  category:       ReviewFlagCategory
+  source?:        'R1' | 'R2' | 'both'
+  confirmed?:     boolean
 }
 
 export const reviewHunkSchema = z.object({
-  id:         z.string().catch(() => `h_${Math.random().toString(36).slice(2,8)}`),
-  filename:   z.string().min(1).catch('unknown'),
-  line_start: z.number().int().min(1).catch(1),
-  line_end:   z.number().int().min(1).catch(1),
-  severity:   z.enum(['HIGH', 'MEDIUM', 'LOW']).catch('MEDIUM'),
-  issue:      z.string().catch(''),
-  fixed_code: z.string().catch(''),
-  category:   z.enum([
+  id:            z.string().catch(() => `h_${Math.random().toString(36).slice(2,8)}`),
+  filename:      z.string().min(1).catch('unknown'),
+  line_start:    z.number().int().min(1).catch(1),
+  line_end:      z.number().int().min(1).catch(1),
+  severity:      z.enum(['HIGH', 'MEDIUM', 'LOW']).catch('MEDIUM'),
+  issue:         z.string().catch(''),
+  original_code: z.string().catch(''),
+  fixed_code:    z.string().catch(''),
+  category:      z.enum([
     'logic','security','performance','correctness',
     'missing_implementation','edge_case','contract_violation',
   ]).catch('logic'),
 })
 
 export const reviewHunksSchema = z.array(reviewHunkSchema).catch([])
+
+// ─── Previous Hunk Record — passed to re-review so models can issue verdicts ─
+
+export interface PreviousHunkRecord {
+  id:            string
+  issue:         string
+  original_code: string   // text that was there before the fix
+  fixed_code:    string   // what was applied
+}
+
+// ─── Re-review verdict ────────────────────────────────────────────────────────
+
+export interface HunkVerdict {
+  id:    string
+  status: 'FIXED' | 'NOT_FIXED'
+  hunk?: ReviewHunk   // only when NOT_FIXED
+}
 
 // ─── Hunk Conflict ────────────────────────────────────────────────────────────
 
@@ -277,12 +296,13 @@ export const crossReviewResponseSchema = z.object({
 // ─── Resolved Hunk ────────────────────────────────────────────────────────────
 
 export interface ResolvedHunk {
-  filename:   string
-  line_start: number
-  line_end:   number
-  new_code:   string
-  source:     'R1' | 'R2' | 'both' | 'cross_review' | 'human'
-  flag_ids:   string[]
+  filename:       string
+  line_start:     number
+  line_end:       number
+  original_code?: string   // verbatim text that was replaced (for anchor-based apply)
+  new_code:       string
+  source:         'R1' | 'R2' | 'both' | 'cross_review' | 'human'
+  flag_ids:       string[]
 }
 
 // ─── Arbitration ──────────────────────────────────────────────────────────────
@@ -354,24 +374,28 @@ export interface ModelAdapter {
 
   // Phase 3: DeepSeek generates the current file — streams tokens
   generate(
-    filename:       string,
-    fileDef:        FileDefinition,
-    manifest:       FileManifest,
-    spec:           SpecDocument,
-    generatedSoFar: Record<string, string>,
-    contextText:    string | undefined,
-    onToken:        (token: string) => void,
+    filename:           string,
+    fileDef:            FileDefinition,
+    manifest:           FileManifest,
+    spec:               SpecDocument,
+    generatedSoFar:     Record<string, string>,
+    contextText:        string | undefined,
+    onToken:            (token: string) => void,
+    regenerationHint?:  string,
   ): Promise<{ code: string; tokensOut: number }>
 
-  // Phase 3: R1/R2 review the generated file and produce drop-in fix hunks
+  // Phase 3: R1/R2 review the generated file and produce anchor-based fix hunks.
+  // Round 1: full initial review.
+  // Round > 1: re-review — returns NOT_FIXED hunks + new HIGH issues only.
   reviewAndPatch(
-    filename:        string,
-    code:            string,
-    spec:            SpecDocument,
-    manifest:        FileManifest,
-    round:           number,
-    previousHunks?:  ReviewHunk[],
-  ): Promise<ReviewHunk[]>
+    filename:              string,
+    code:                  string,
+    spec:                  SpecDocument,
+    manifest:              FileManifest,
+    round:                 number,
+    previousHunkRecords?:  PreviousHunkRecord[],
+    compilerErrors?:       string[],
+  ): Promise<{ hunks: ReviewHunk[]; droppedCount: number }>
 
   // Phase 3: cross-review — evaluate the other reviewer's conflicting hunk
   crossReview(
@@ -477,13 +501,17 @@ export interface PipelineSessionState {
   fileManifest?:     FileManifest
 
   // Phase 3 — per-file state
-  currentFileCode?:  string             // DeepSeek generated code for current file
-  r1Hunks?:          ReviewHunk[]       // R1's review hunks for current file
-  r2Hunks?:          ReviewHunk[]       // R2's review hunks for current file
-  conflicts?:        HunkConflict[]     // overlapping hunks
-  resolvedHunks?:    ResolvedHunk[]     // after cross-review + merge
-  patchedCode?:      string             // after DeepSeek applies patches
-  arbitrationPkg?:   ArbitrationPackage
+  currentFileCode?:      string             // DeepSeek generated code for current file
+  r1Hunks?:              ReviewHunk[]       // R1's review hunks for current file
+  r2Hunks?:              ReviewHunk[]       // R2's review hunks for current file
+  conflicts?:            HunkConflict[]     // overlapping hunks
+  resolvedHunks?:        ResolvedHunk[]     // after cross-review + merge
+  patchedCode?:          string             // after deterministic patch apply
+  arbitrationPkg?:       ArbitrationPackage
+  previousHunkRecords?:  PreviousHunkRecord[]  // passed to re-review for FIXED/NOT_FIXED verdicts
+  compilerErrors?:       string[]             // compiler diagnostics from last verify pass
+  regenAttempted?:       boolean              // one regen attempt at round 3 before arbitration
+  regenHint?:            string               // hint built before resetPerFileState, used in regen generate
 
   // Accepted files (all files)
   acceptedFiles:     Record<string, string>   // filename → final code
@@ -662,3 +690,5 @@ export type SSEEvent =
   | { type: 'arbitration';           pkg: ArbitrationPackage }
   | { type: 'output_gate_ready';     files: Record<string, string> }
   | { type: 'consensus';             output: ConsensusOutput }
+  | { type: 'verify_result';         filename: string; ok: boolean; errors: string[] }
+  | { type: 'hunks_dropped';         filename: string; count: number; reasons: string[] }

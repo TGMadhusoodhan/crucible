@@ -2,17 +2,18 @@ import { appendSessionLog } from '@/lib/memory/session-log'
 import type { FileManifest, ModelAdapter, SpecDocument, SSEEvent } from '@/types'
 
 export async function runPhase3Generate(
-  projectId:      string,
-  sessionId:      string,
-  filename:       string,
-  fileIndex:      number,
-  totalFiles:     number,
-  manifest:       FileManifest,
-  spec:           SpecDocument,
-  coderAdapter:   ModelAdapter,
-  generatedSoFar: Record<string, string>,
-  emit:           (e: SSEEvent) => void,
-  contextText?:   string,
+  projectId:          string,
+  sessionId:          string,
+  filename:           string,
+  fileIndex:          number,
+  totalFiles:         number,
+  manifest:           FileManifest,
+  spec:               SpecDocument,
+  coderAdapter:       ModelAdapter,
+  generatedSoFar:     Record<string, string>,
+  emit:               (e: SSEEvent) => void,
+  contextText?:       string,
+  regenerationHint?:  string,
 ): Promise<string> {
   emit({ type: 'phase_change', phase: 'phase3_generating' })
   emit({ type: 'file_generating', filename, fileIndex, totalFiles })
@@ -23,6 +24,7 @@ export async function runPhase3Generate(
   const { code: generated } = await coderAdapter.generate(
     filename, fileDef, manifest, spec, generatedSoFar, contextText,
     (token) => emit({ type: 'token', text: token }),
+    regenerationHint,
   )
 
   emit({ type: 'file_generated', filename, code: generated })

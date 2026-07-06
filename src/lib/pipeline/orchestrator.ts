@@ -18,6 +18,7 @@ import { runPhase3Generate }       from './phase3-generate'
 import { runPhase3Review }         from './phase3-review'
 import { runPhase3CrossReview }    from './phase3-cross-review'
 import { runPhase3Patch }          from './phase3-patch'
+import { verifyFile }              from './verify'
 import type {
   ArbitrationPackage,
   BudgetMode,
@@ -26,8 +27,10 @@ import type {
   PipelineConfig,
   PipelinePhase,
   PipelineSessionState,
+  PreviousHunkRecord,
   Provider,
   ResolvedHunk,
+  ReviewHunk,
   SpecDocument,
   SSEEvent,
   ThinkingOutput,
@@ -152,12 +155,16 @@ export async function createSession(params: StartPipelineParams): Promise<string
     taskDescription:     params.taskDescription,
     contextText:         contextText || undefined,
 
-    r1Hunks:             [],
-    r2Hunks:             [],
-    conflicts:           [],
-    resolvedHunks:       [],
-    patchedCode:         undefined,
-    currentFileCode:     undefined,
+    r1Hunks:              [],
+    r2Hunks:              [],
+    conflicts:            [],
+    resolvedHunks:        [],
+    patchedCode:          undefined,
+    currentFileCode:      undefined,
+    previousHunkRecords:  undefined,
+    compilerErrors:       undefined,
+    regenAttempted:       false,
+    regenHint:            undefined,
 
     acceptedFiles:       {},
     streamingCode:       '',
@@ -261,12 +268,13 @@ export async function resolveMicroGate(
 
   const chosenHunk = choice === 'R1' ? conflict.r1_hunk : conflict.r2_hunk
   const resolvedHunk: ResolvedHunk = {
-    filename:   conflict.filename,
-    line_start: conflict.line_start,
-    line_end:   conflict.line_end,
-    new_code:   chosenHunk.fixed_code,
-    source:     'human',
-    flag_ids:   [conflict.r1_hunk.id, conflict.r2_hunk.id],
+    filename:      conflict.filename,
+    line_start:    conflict.line_start,
+    line_end:      conflict.line_end,
+    original_code: conflict.original_code,
+    new_code:      chosenHunk.fixed_code,
+    source:        'human',
+    flag_ids:      [conflict.r1_hunk.id, conflict.r2_hunk.id],
   }
 
   state.resolvedHunks = [...(state.resolvedHunks ?? []), resolvedHunk]
@@ -300,15 +308,16 @@ export async function resolveArbitration(
     const wantedSource = choice === 'r1' ? 'R1' : 'R2'
     const chosenHunks  = pkg.unresolved_hunks.filter(h => h.source === wantedSource)
     const resolved: ResolvedHunk[] = chosenHunks.map(h => ({
-      filename:   h.filename,
-      line_start: h.line_start,
-      line_end:   h.line_end,
-      new_code:   h.fixed_code,
-      source:     'human',
-      flag_ids:   [h.id],
+      filename:      h.filename,
+      line_start:    h.line_start,
+      line_end:      h.line_end,
+      original_code: h.original_code,
+      new_code:      h.fixed_code,
+      source:        'human' as const,
+      flag_ids:      [h.id],
     }))
     const baseCode  = state.patchedCode ?? state.currentFileCode ?? ''
-    const finalCode = applyResolvedHunks(baseCode, resolved)
+    const { code: finalCode } = applyResolvedHunks(baseCode, resolved)
 
     state.acceptedFiles[filename] = finalCode
     state.currentFileIdx += 1
@@ -458,13 +467,41 @@ async function transition(
 // ─── Per-file state reset (between rounds / after a file is accepted) ────────
 
 function resetPerFileState(state: PipelineSessionState): void {
-  state.currentFileCode = undefined
-  state.r1Hunks          = []
-  state.r2Hunks          = []
-  state.resolvedHunks    = []
-  state.conflicts        = []
-  state.patchedCode      = undefined
-  state.arbitrationPkg   = undefined
+  state.currentFileCode     = undefined
+  state.r1Hunks             = []
+  state.r2Hunks             = []
+  state.resolvedHunks       = []
+  state.conflicts           = []
+  state.patchedCode         = undefined
+  state.arbitrationPkg      = undefined
+  state.previousHunkRecords = undefined
+  state.compilerErrors      = undefined
+  state.regenAttempted      = false
+  state.regenHint           = undefined
+}
+
+// ─── Build PreviousHunkRecord list from applied resolved hunks ────────────────
+// Maps each resolved hunk back to the original ReviewHunk issue text so the
+// re-review prompt can ask for FIXED/NOT_FIXED verdicts per issue ID.
+
+function buildPreviousHunkRecords(
+  resolvedHunks: ResolvedHunk[],
+  r1Hunks:       ReviewHunk[],
+  r2Hunks:       ReviewHunk[],
+): PreviousHunkRecord[] {
+  const allHunks = [...r1Hunks, ...r2Hunks]
+  return resolvedHunks.flatMap(rh => {
+    // Each flag_id links back to an original ReviewHunk
+    return rh.flag_ids.map(id => {
+      const orig = allHunks.find(h => h.id === id)
+      return {
+        id,
+        issue:         orig?.issue         ?? 'issue',
+        original_code: rh.original_code    ?? orig?.original_code ?? '',
+        fixed_code:    rh.new_code,
+      }
+    })
+  })
 }
 
 // ─── Main pipeline runner (resumable state machine) ──────────────────────────
@@ -688,18 +725,33 @@ export async function runPipeline(
   }
 
   // ─── Phase 3: per-file generate → review → cross-review → patch loop ────
+  // Structure: generate → [review → merge → (cross-review) → patch → verify → next round review]
+  // The NEXT round's review IS the verification of the previous patch — no separate re_review step.
 
   const getOrder = () => state!.fileManifest?.generation_order ?? ['output.ts']
 
-  async function acceptCurrentFile(): Promise<void> {
-    const filename = getOrder()[state!.currentFileIdx]!
-    const code = state!.patchedCode ?? state!.currentFileCode!
-    state!.acceptedFiles[filename] = code
-    emit({ type: 'file_accepted', filename, code })
+  async function acceptCurrentFile(codeOverride?: string): Promise<void> {
+    const fname = getOrder()[state!.currentFileIdx]!
+    const code  = codeOverride ?? state!.patchedCode ?? state!.currentFileCode!
+    state!.acceptedFiles[fname] = code
+    emit({ type: 'file_accepted', filename: fname, code })
     await appendSessionLog(projectId, sessionId, {
-      phase: 'phase3_re_review', actor: 'system',
-      summary: `File accepted: ${filename}`,
+      phase: 'phase3_reviewing', actor: 'system',
+      summary: `File accepted: ${fname}`,
     })
+  }
+
+  async function advanceToNextFile(): Promise<boolean> {
+    state!.currentFileIdx += 1
+    state!.round = 1
+    resetPerFileState(state!)
+    if (state!.currentFileIdx < getOrder().length) {
+      state = await transition(state!, 'phase3_generating')
+      return true
+    }
+    emit({ type: 'output_gate_ready', files: state!.acceptedFiles })
+    state = await transition(state!, 'output_gate')
+    return false
   }
 
   while (state.currentFileIdx < getOrder().length) {
@@ -718,6 +770,8 @@ export async function runPipeline(
           projectId, sessionId, filename, state.currentFileIdx,
           totalFiles, state.fileManifest!, state.spec!, coderAdapter,
           state.acceptedFiles, emit, state.contextText,
+          // regenHint was captured before resetPerFileState cleared r1Hunks/compilerErrors
+          state.regenAttempted ? state.regenHint : undefined,
         )
         state.currentFileCode = code
         state = await transition(state, 'phase3_reviewing')
@@ -728,41 +782,33 @@ export async function runPipeline(
     }
 
     // ── 3b: R1 + R2 review in parallel ────────────────────────────────────
+    // Round 1 → full initial review.
+    // Round > 1 → re-review mode: FIXED/NOT_FIXED verdicts + new HIGH only.
 
     if (state.phase === 'phase3_reviewing') {
       try {
-        const previousHighHunks = state.round > 1
-          ? [...(state.r1Hunks ?? []), ...(state.r2Hunks ?? [])].filter(h => h.severity === 'HIGH')
-          : undefined
-
+        const codeToReview = state.patchedCode ?? state.currentFileCode!
         const { r1, r2 } = await runPhase3Review(
-          projectId, sessionId, filename, state.currentFileCode!,
+          projectId, sessionId, filename, codeToReview,
           state.spec!, state.fileManifest!, state.round,
-          r1Adapter, r2Adapter, emit, previousHighHunks,
+          r1Adapter, r2Adapter, emit,
+          state.previousHunkRecords,
+          state.compilerErrors,
         )
         state.r1Hunks = r1
         state.r2Hunks = r2
 
-        const anyHigh = [...r1, ...r2].some(h => h.severity === 'HIGH')
-        if (!anyHigh) {
-          await acceptCurrentFile()
-          state.currentFileIdx += 1
-          state.round = 1
-          resetPerFileState(state)
-          if (state.currentFileIdx < getOrder().length) {
-            state = await transition(state, 'phase3_generating')
-          } else {
-            emit({ type: 'output_gate_ready', files: state.acceptedFiles })
-            state = await transition(state, 'output_gate')
-            return
-          }
-          continue
+        const highHunks = [...r1, ...r2].filter(isActionable)
+        if (highHunks.length === 0) {
+          await acceptCurrentFile(codeToReview)
+          if (await advanceToNextFile()) continue
+          return
         }
 
         const { resolved, conflicts } = mergeReviewHunks(
-          r1.filter(h => h.severity === 'HIGH'),
-          r2.filter(h => h.severity === 'HIGH'),
-          { [filename]: state.currentFileCode! },
+          r1.filter(isActionable),
+          r2.filter(isActionable),
+          { [filename]: codeToReview },
         )
 
         state.resolvedHunks = resolved
@@ -792,7 +838,6 @@ export async function runPipeline(
         state.resolvedHunks = [...(state.resolvedHunks ?? []), ...resolved]
 
         if (stillConflicting.length > 0) {
-          // micro_gate emitted inside runPhase3CrossReview
           state.conflicts = stillConflicting
           state = await transition(state, 'phase3_micro_gate')
           return
@@ -808,74 +853,67 @@ export async function runPipeline(
 
     if (state.phase === 'phase3_micro_gate') return
 
-    // ── 3e: DeepSeek applies resolved patches ─────────────────────────────
+    // ── 3d: Deterministic patch apply + compiler verify ───────────────────
 
     if (state.phase === 'phase3_patching') {
       try {
+        // Bug fix: round 2+ must patch against the previously-patched code,
+        // not the original generated code — reviewers' anchors reference patchedCode.
+        const baseCode = state.patchedCode ?? state.currentFileCode!
         const patchedCode = await runPhase3Patch(
           projectId, sessionId, filename,
-          state.currentFileCode!, state.resolvedHunks!,
+          baseCode, state.resolvedHunks!,
           coderAdapter, emit,
         )
         state.patchedCode = patchedCode
-        state = await transition(state, 'phase3_re_review')
-      } catch (err) {
-        await handleError(state, err, emit)
-        return
-      }
-    }
 
-    // ── 3f: Re-review patched file ────────────────────────────────────────
-
-    if (state.phase === 'phase3_re_review') {
-      try {
-        const { r1: r1New, r2: r2New } = await runPhase3Review(
-          projectId, sessionId, filename, state.patchedCode!,
-          state.spec!, state.fileManifest!, state.round,
-          r1Adapter, r2Adapter, emit,
+        // Build previousHunkRecords BEFORE resetPerFileState wipes r1/r2Hunks
+        state.previousHunkRecords = buildPreviousHunkRecords(
+          state.resolvedHunks ?? [],
+          state.r1Hunks       ?? [],
+          state.r2Hunks       ?? [],
         )
 
-        // Tag each hunk with its origin — reviewAndPatch()'s output never sets
-        // .source, and resolveArbitration's 'r1'/'r2' choice depends on it to
-        // pick the right hunks out of pkg.unresolved_hunks.
-        const highRemaining = [
-          ...r1New.filter(h => h.severity === 'HIGH').map(h => ({ ...h, source: 'R1' as const })),
-          ...r2New.filter(h => h.severity === 'HIGH').map(h => ({ ...h, source: 'R2' as const })),
-        ]
+        // Compiler gate — runs before the next review round
+        const verify = await verifyFile(filename, patchedCode, state.acceptedFiles)
+        emit({ type: 'verify_result', filename, ok: verify.ok, errors: verify.errors })
+        state.compilerErrors = verify.ok ? undefined : verify.errors
 
-        if (highRemaining.length === 0) {
-          state.currentFileCode = state.patchedCode!
-          await acceptCurrentFile()
-          state.currentFileIdx += 1
-          state.round = 1
-          resetPerFileState(state)
-          if (state.currentFileIdx < getOrder().length) {
-            state = await transition(state, 'phase3_generating')
-          } else {
-            emit({ type: 'output_gate_ready', files: state.acceptedFiles })
-            state = await transition(state, 'output_gate')
-            return
-          }
-        } else if (state.round < 3) {
-          const patched = state.patchedCode!
-          state.round += 1
-          resetPerFileState(state)
-          state.currentFileCode = patched
-          state.r1Hunks = r1New
-          state.r2Hunks = r2New
-          state = await transition(state, 'phase3_reviewing')
-        } else {
+        // Check round cap
+        const maxRounds = 3
+        if (state.round >= maxRounds && !state.regenAttempted) {
+          // One regeneration attempt before going to arbitration.
+          // IMPORTANT: build the hint before resetPerFileState wipes r1/r2Hunks and
+          // compilerErrors, then set regenAttempted=true AFTER the reset so it isn't
+          // overwritten back to false.
+          dbg.orch('round cap reached — trying one regen before arbitration', { round: state.round, filename })
+          const hint = buildRegenHint(state.r1Hunks ?? [], state.r2Hunks ?? [], state.compilerErrors)
+          resetPerFileState(state)           // clears regenAttempted → false
+          state.regenAttempted = true        // must be set AFTER reset
+          state.regenHint      = hint        // preserved through the regen generate call
+          state.round = maxRounds
+          state = await transition(state, 'phase3_generating')
+        } else if (state.round >= maxRounds && state.regenAttempted) {
+          // Already tried regeneration — go to arbitration
+          const highRemaining = [
+            ...(state.r1Hunks ?? []).filter(isActionable).map(h => ({ ...h, source: 'R1' as const })),
+            ...(state.r2Hunks ?? []).filter(isActionable).map(h => ({ ...h, source: 'R2' as const })),
+          ]
           const pkg: ArbitrationPackage = {
             filename,
-            round: state.round,
+            round:            state.round,
             unresolved_hunks: highRemaining,
-            r1_summary: `R1 flagged ${r1New.filter(h => h.severity === 'HIGH').length} issues`,
-            r2_summary: `R2 flagged ${r2New.filter(h => h.severity === 'HIGH').length} issues`,
+            r1_summary:       `R1 flagged ${(state.r1Hunks ?? []).filter(isActionable).length} issues`,
+            r2_summary:       `R2 flagged ${(state.r2Hunks ?? []).filter(isActionable).length} issues`,
           }
           state.arbitrationPkg = pkg
           emit({ type: 'arbitration', pkg })
           state = await transition(state, 'phase3_arbitration')
           return
+        } else {
+          // Advance to the next round's review (collapses the old re_review step)
+          state.round += 1
+          state = await transition(state, 'phase3_reviewing')
         }
       } catch (err) {
         await handleError(state, err, emit)
@@ -883,10 +921,46 @@ export async function runPipeline(
       }
     }
 
+    // phase3_re_review is kept in the PipelinePhase enum for UI/reconnect compat
+    // but is no longer entered from the happy-path loop — the patch step transitions
+    // directly to phase3_reviewing (next round).
+    if (state.phase === 'phase3_re_review') {
+      state = await transition(state, 'phase3_reviewing')
+    }
+
     if (state.phase === 'phase3_arbitration') return
   }
 
   if (state.phase === 'output_gate') return
+}
+
+// ─── Actionable hunk predicate ────────────────────────────────────────────────
+// Excludes placeholder hunks produced by parseReReviewResponse when a model
+// omits a verdict or says NOT_FIXED without providing a fix. These carry no
+// applicable replacement and must not stall the convergence check.
+
+function isActionable(h: ReviewHunk): boolean {
+  return h.severity === 'HIGH' && h.filename !== 'unknown' && h.fixed_code.trim() !== ''
+}
+
+// ─── Regeneration hint builder ────────────────────────────────────────────────
+
+function buildRegenHint(
+  r1Hunks:        ReviewHunk[],
+  r2Hunks:        ReviewHunk[],
+  compilerErrors: string[] | undefined,
+): string {
+  const parts: string[] = []
+  if (compilerErrors?.length) {
+    parts.push('COMPILER ERRORS (must fix):')
+    compilerErrors.forEach(e => parts.push(`  - ${e}`))
+  }
+  const highIssues = [...r1Hunks, ...r2Hunks].filter(h => h.severity === 'HIGH')
+  if (highIssues.length > 0) {
+    parts.push('KNOWN HIGH-SEVERITY ISSUES (must avoid):')
+    highIssues.forEach(h => parts.push(`  - ${h.issue}`))
+  }
+  return parts.join('\n')
 }
 
 // ─── Error handler ────────────────────────────────────────────────────────────

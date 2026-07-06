@@ -1,24 +1,23 @@
 # Current Build Step
-Step: V3 Dual-Reviewer Architecture Rebuild
+Step: Phase 3 convergence fixes — anchor-based patches
 Status: COMPLETE
-Started: 2026-07-05
-Last Updated: 2026-07-05
+Started: 2026-07-06
+Last Updated: 2026-07-06
 
 ## What Is Done In This Step
 
-- Full V3 dual-reviewer architecture: types, store, adapters, pipeline, orchestrator, API routes,
-  components, DB schema (see prior sessions in build_log.md)
-- Live end-to-end testing with real API keys (Claude Sonnet 4.6, GPT-4o, DeepSeek V4 Pro):
-  math.ts single-file and LRU-cache two-file tasks both completed to output gate
-- 6 bugs fixed during live testing (duplicate spec IDs, manifest duplicate-file, OutputGatePanel
-  fix not updating code, arbitration filter, path traversal, stream reconnect data loss)
-- Conflict/micro-gate/arbitration paths verified deterministically:
-  - 24/24 unit tests for mergeReviewHunks + applyResolvedHunks (scripts/test-hunk-merge.mjs)
-  - All 4 arbitration choices (r1/r2/accept/regenerate) + micro-gate resolve verified via curl
+- Anchor-based patch apply (`original_code` verbatim field on ReviewHunk)
+- Deterministic `applyResolvedHunks` with string replacement + `failedHunks` fallback
+- Compiler gate (`verify.ts`) feeds diagnostics into next review round
+- Re-review mode (round > 1): FIXED/NOT_FIXED verdicts per previous hunk ID
+- Loop collapsed: `phase3_patching` → `phase3_reviewing` directly (no separate re_review)
+- One regen-before-arbitration at round 3 failure
+- `locateInFile` helper used in both merge (conflict detection) and apply
+- 36/36 hunk-merge tests passing. Zero TypeScript errors.
 
 ## What Remains In This Step
 
-- None — architecture, live testing, and conflict path verification complete
+- None — convergence fix is code-complete. Not yet live-tested with real API keys.
 
 ## Blockers
 
@@ -26,8 +25,6 @@ Last Updated: 2026-07-05
 
 ## Next
 
-- Optional polish only (explicitly V1 deferred):
-  OutputGatePanel MEDIUM/LOW hunk line-decorations + "Arbitrated" file badge
-  (needs per-file hunk history in server state)
-- acceptOutputFile out-of-order-accept edge case
-- Production Docker build + smoke test
+- Live end-to-end test with real API keys to verify convergence improvement
+- Optional UI polish (OutputGatePanel line decorations, arbitrated badge)
+- Production Docker smoke test

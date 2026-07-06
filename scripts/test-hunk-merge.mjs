@@ -12,6 +12,45 @@ function assert(cond, msg) {
 
 // ─── Inline the logic under test (avoids TSX transpile overhead) ─────────────
 
+function locateInFile(code, originalCode, lineHint) {
+  const fileLines   = code.split('\n')
+  const anchorLines = originalCode.split('\n')
+  const n = anchorLines.length
+
+  // Exact match
+  const exactMatches = []
+  outer: for (let i = 0; i <= fileLines.length - n; i++) {
+    for (let k = 0; k < n; k++) {
+      if (fileLines[i + k] !== anchorLines[k]) continue outer
+    }
+    exactMatches.push(i)
+  }
+  if (exactMatches.length > 0) {
+    const best = exactMatches.reduce((a, b) =>
+      Math.abs(a - (lineHint - 1)) <= Math.abs(b - (lineHint - 1)) ? a : b
+    )
+    return { lineStart: best + 1, lineEnd: best + n }
+  }
+
+  // Whitespace-normalized match
+  const normalAnchor = anchorLines.map(l => l.trimEnd())
+  const normalMatches = []
+  outer2: for (let i = 0; i <= fileLines.length - n; i++) {
+    for (let k = 0; k < n; k++) {
+      if (fileLines[i + k].trimEnd() !== normalAnchor[k]) continue outer2
+    }
+    normalMatches.push(i)
+  }
+  if (normalMatches.length > 0) {
+    const best = normalMatches.reduce((a, b) =>
+      Math.abs(a - (lineHint - 1)) <= Math.abs(b - (lineHint - 1)) ? a : b
+    )
+    return { lineStart: best + 1, lineEnd: best + n }
+  }
+
+  return null
+}
+
 function rangesOverlap(a, b) {
   return a.line_start <= b.line_end && b.line_start <= a.line_end
 }
@@ -27,18 +66,41 @@ function groupByFile(hunks) {
 
 const SEVERITY_RANK = { HIGH: 2, MEDIUM: 1, LOW: 0 }
 
+function locate(hunk, fileContent) {
+  if (!hunk.original_code?.trim()) return hunk
+  const loc = locateInFile(fileContent, hunk.original_code, hunk.line_start)
+  if (!loc) return hunk
+  return { ...hunk, line_start: loc.lineStart, line_end: loc.lineEnd }
+}
+
 function collapseGroup(hunks, source, lineStart, lineEnd) {
   const winner = hunks.length === 1
     ? hunks[0]
     : hunks.reduce((best, h) => (SEVERITY_RANK[h.severity] > SEVERITY_RANK[best.severity] ? h : best))
-  return { ...winner, id: hunks.map(h => h.id).join('+'), line_start: lineStart, line_end: lineEnd, issue: hunks.map(h => h.issue).join(' | '), source }
+  return {
+    ...winner,
+    id: hunks.map(h => h.id).join('+'),
+    line_start: lineStart,
+    line_end: lineEnd,
+    issue: hunks.map(h => h.issue).join(' | '),
+    original_code: hunks.length === 1 ? winner.original_code : undefined,
+    source,
+  }
 }
 
 function toResolvedFromGroup(hunks, source, lineStart, lineEnd) {
   const winner = hunks.length === 1
     ? hunks[0]
     : hunks.reduce((best, h) => (SEVERITY_RANK[h.severity] > SEVERITY_RANK[best.severity] ? h : best))
-  return { filename: winner.filename, line_start: lineStart, line_end: lineEnd, new_code: winner.fixed_code, source, flag_ids: hunks.map(h => h.id) }
+  return {
+    filename:      winner.filename,
+    line_start:    lineStart,
+    line_end:      lineEnd,
+    original_code: hunks.length === 1 ? winner.original_code : undefined,
+    new_code:      winner.fixed_code,
+    source,
+    flag_ids:      hunks.map(h => h.id),
+  }
 }
 
 function groupOverlapping(r1, r2) {
@@ -82,14 +144,25 @@ function mergeReviewHunks(r1Hunks, r2Hunks, originalCode) {
     const r2   = r2ByFile.get(filename) ?? []
     const orig = originalCode[filename] ?? ''
 
-    for (const group of groupOverlapping(r1, r2)) {
+    const locatedR1 = r1.map(h => locate(h, orig))
+    const locatedR2 = r2.map(h => locate(h, orig))
+
+    for (const group of groupOverlapping(locatedR1, locatedR2)) {
       const lineStart = Math.min(...group.all.map(h => h.line_start))
       const lineEnd   = Math.max(...group.all.map(h => h.line_end))
 
       if (group.r1.length > 0 && group.r2.length > 0) {
         const r1Hunk = collapseGroup(group.r1, 'R1', lineStart, lineEnd)
         const r2Hunk = collapseGroup(group.r2, 'R2', lineStart, lineEnd)
-        conflicts.push({ id: `conflict_${r1Hunk.id}_${r2Hunk.id}`, filename, line_start: lineStart, line_end: lineEnd, r1_hunk: r1Hunk, r2_hunk: r2Hunk, original_code: orig.split('\n').slice(lineStart - 1, lineEnd).join('\n') })
+        conflicts.push({
+          id: `conflict_${r1Hunk.id}_${r2Hunk.id}`,
+          filename,
+          line_start: lineStart,
+          line_end:   lineEnd,
+          r1_hunk:    r1Hunk,
+          r2_hunk:    r2Hunk,
+          original_code: orig.split('\n').slice(lineStart - 1, lineEnd).join('\n'),
+        })
       } else if (group.r1.length > 0) {
         resolved.push(toResolvedFromGroup(group.r1, 'R1', lineStart, lineEnd))
       } else {
@@ -100,16 +173,51 @@ function mergeReviewHunks(r1Hunks, r2Hunks, originalCode) {
   return { resolved, conflicts }
 }
 
+// Anchor-based apply with line-based fallback for hunks without original_code.
+// Returns { code, failedHunks }.
 function applyResolvedHunks(code, hunks) {
-  const sorted = [...hunks].sort((a, b) => b.line_start - a.line_start)
-  const lines  = code.split('\n')
-  for (const hunk of sorted) {
-    const start    = Math.max(0, hunk.line_start - 1)
-    const end      = Math.min(lines.length, hunk.line_end)
+  const failedHunks = []
+  const anchorHunks = []
+  const lineHunks   = []
+
+  for (const hunk of hunks) {
+    if (hunk.original_code?.trim()) {
+      const loc = locateInFile(code, hunk.original_code, hunk.line_start)
+      if (loc) {
+        anchorHunks.push({ hunk, lineStart: loc.lineStart, lineEnd: loc.lineEnd })
+      } else {
+        failedHunks.push(hunk)
+      }
+    } else {
+      lineHunks.push(hunk)
+    }
+  }
+
+  // Apply anchor hunks bottom-to-top by located position
+  const sortedAnchor = anchorHunks.sort((a, b) => b.lineStart - a.lineStart)
+  const lines = code.split('\n')
+  for (const { hunk, lineStart, lineEnd } of sortedAnchor) {
+    const start    = Math.max(0, lineStart - 1)
+    const end      = Math.min(lines.length, lineEnd)
     const newLines = hunk.new_code.split('\n')
     lines.splice(start, end - start, ...newLines)
   }
-  return lines.join('\n')
+  let result = lines.join('\n')
+
+  // Apply line-based hunks bottom-to-top (fallback when no original_code)
+  if (lineHunks.length > 0) {
+    const sortedLine = [...lineHunks].sort((a, b) => b.line_start - a.line_start)
+    const fallbackLines = result.split('\n')
+    for (const hunk of sortedLine) {
+      const start    = Math.max(0, hunk.line_start - 1)
+      const end      = Math.min(fallbackLines.length, hunk.line_end)
+      const newLines = hunk.new_code.split('\n')
+      fallbackLines.splice(start, end - start, ...newLines)
+    }
+    result = fallbackLines.join('\n')
+  }
+
+  return { code: result, failedHunks }
 }
 
 // ─── Test cases ───────────────────────────────────────────────────────────────
@@ -173,28 +281,29 @@ console.log('\nTest 4: R1-only hunk → resolved as R1')
   assert(result.resolved[0].new_code === 'R1_ONLY', 'Correct fix code')
 }
 
-// ── Test 5: applyResolvedHunks correctness ────────────────────────────────────
-console.log('\nTest 5: applyResolvedHunks applies edits bottom-to-top correctly')
+// ── Test 5: applyResolvedHunks — line-based fallback (no original_code) ───────
+console.log('\nTest 5: applyResolvedHunks line-based fallback applies bottom-to-top correctly')
 {
-  const code     = 'a\nb\nc\nd\ne'
+  const code  = 'a\nb\nc\nd\ne'
   const hunks = [
     { filename: file, line_start: 4, line_end: 5, new_code: 'D\nE', source: 'R1', flag_ids: [] },
     { filename: file, line_start: 1, line_end: 2, new_code: 'A\nB', source: 'R2', flag_ids: [] },
   ]
-  const result = applyResolvedHunks(code, hunks)
+  const { code: result, failedHunks } = applyResolvedHunks(code, hunks)
   assert(result === 'A\nB\nc\nD\nE', `Result is "A\\nB\\nc\\nD\\nE" (got: ${JSON.stringify(result)})`)
+  assert(failedHunks.length === 0, 'No failed hunks')
 }
 
-// ── Test 6: applyResolvedHunks with replacement that changes line count ───────
-console.log('\nTest 6: applyResolvedHunks handles different line counts')
+// ── Test 6: applyResolvedHunks line-based with changed line count ─────────────
+console.log('\nTest 6: applyResolvedHunks line-based handles different line counts')
 {
   const code  = 'a\nb\nc\nd\ne'
   const hunks = [
     { filename: file, line_start: 2, line_end: 3, new_code: 'X\nY\nZ', source: 'R1', flag_ids: [] },
   ]
-  const result = applyResolvedHunks(code, hunks)
-  // lines 2-3 (b,c) replaced by X,Y,Z → a, X, Y, Z, d, e
+  const { code: result, failedHunks } = applyResolvedHunks(code, hunks)
   assert(result === 'a\nX\nY\nZ\nd\ne', `Got: ${JSON.stringify(result)}`)
+  assert(failedHunks.length === 0, 'No failed hunks')
 }
 
 // ── Test 7: Conflict on different files → separate conflicts ──────────────────
@@ -214,6 +323,80 @@ console.log('\nTest 7: Multi-file — conflicts stay per-file')
   assert(result.resolved.length === 2, 'b.ts non-overlapping hunks both resolved')
   assert(result.conflicts[0].filename === 'a.ts', 'Conflict is on a.ts')
   assert(result.resolved.every(h => h.filename === 'b.ts'), 'All resolved are on b.ts')
+}
+
+// ── Test 8: applyResolvedHunks — anchor-based (with original_code) ────────────
+console.log('\nTest 8: applyResolvedHunks anchor-based replacement')
+{
+  const code = 'function foo() {\n  const x = 1\n  return x\n}\n\nfunction bar() {\n  return 42\n}'
+  const hunks = [
+    {
+      filename: file,
+      line_start: 2,
+      line_end: 2,
+      original_code: '  const x = 1',
+      new_code: '  const x = 99',
+      source: 'R1',
+      flag_ids: [],
+    },
+  ]
+  const { code: result, failedHunks } = applyResolvedHunks(code, hunks)
+  assert(result.includes('const x = 99'), 'Anchor replacement applied correctly')
+  assert(!result.includes('const x = 1'), 'Old code removed')
+  assert(failedHunks.length === 0, 'No failed hunks')
+}
+
+// ── Test 9: applyResolvedHunks — failed anchor → goes to failedHunks ─────────
+console.log('\nTest 9: applyResolvedHunks — unlocatable anchor returns in failedHunks')
+{
+  const code = 'function foo() {\n  return 1\n}'
+  const hunks = [
+    {
+      filename: file,
+      line_start: 1,
+      line_end: 1,
+      original_code: 'THIS TEXT DOES NOT EXIST',
+      new_code: 'replacement',
+      source: 'R1',
+      flag_ids: ['bad_hunk'],
+    },
+  ]
+  const { code: result, failedHunks } = applyResolvedHunks(code, hunks)
+  assert(result === code, 'Code unchanged when anchor not found')
+  assert(failedHunks.length === 1, 'One failed hunk returned')
+  assert(failedHunks[0].flag_ids[0] === 'bad_hunk', 'Correct hunk in failedHunks')
+}
+
+// ── Test 10: locateInFile — exact match, nearest to hint ─────────────────────
+console.log('\nTest 10: locateInFile returns correct position')
+{
+  const code = 'a\nb\nc\na\nb\nc'  // 'a\nb\nc' appears at lines 1-3 and 4-6
+  const loc1 = locateInFile(code, 'a\nb\nc', 1)
+  assert(loc1?.lineStart === 1, 'Nearest to hint=1 → line 1')
+  const loc2 = locateInFile(code, 'a\nb\nc', 5)
+  assert(loc2?.lineStart === 4, 'Nearest to hint=5 → line 4')
+}
+
+// ── Test 11: mergeReviewHunks — anchor-based overlap detection ───────────────
+console.log('\nTest 11: mergeReviewHunks uses anchor positions for overlap detection')
+{
+  // Two hunks whose line hints don't overlap, but anchors DO (e.g., one anchor
+  // spans multiple lines that the other hunk's line hint says are separate).
+  // Using actual line content so anchors locate correctly.
+  const fileContent = 'alpha\nbeta\ngamma\ndelta\nepsilon'
+  const r1 = [{
+    id: 'h1', filename: file, line_start: 1, line_end: 3,
+    original_code: 'alpha\nbeta\ngamma',
+    severity: 'HIGH', issue: 'r1 fix', fixed_code: 'FIXED_R1', category: 'correctness',
+  }]
+  const r2 = [{
+    id: 'h2', filename: file, line_start: 2, line_end: 4,
+    original_code: 'beta\ngamma\ndelta',
+    severity: 'HIGH', issue: 'r2 fix', fixed_code: 'FIXED_R2', category: 'correctness',
+  }]
+  const result = mergeReviewHunks(r1, r2, { [file]: fileContent })
+  assert(result.conflicts.length === 1, 'Overlapping anchors detected as conflict')
+  assert(result.resolved.length === 0, 'No resolved when anchor-detected overlap')
 }
 
 // ── Summary ───────────────────────────────────────────────────────────────────

@@ -665,6 +665,47 @@ Full rebuild of the pipeline from V2 (primary→reviewer, single reviewer, revie
 
 ---
 
+## Session 2026-07-06 — Phase 3 convergence fixes (anchor-based patches)
+
+### Completed
+
+Full rewrite of Phase 3 review/patch loop to fix convergence failures.
+
+**Root causes fixed:**
+1. `reviewAndPatch` sent unnumbered code → models miscounted lines → `applyResolvedHunks` spliced at wrong offsets
+2. No deterministic verification after patch — convergence depended entirely on LLM opinion
+3. Previous issues not tracked as fixed/unfixed — models re-reported same problems with new IDs
+4. Redundant re-review (separate `phase3_re_review` step) doubled reviewer calls per round
+
+**Changes (6 files + 1 new + tests):**
+
+- `src/types/index.ts` — `ReviewHunk.original_code?: string`, `ResolvedHunk.original_code?: string`, new `PreviousHunkRecord`, `HunkVerdict`; updated `ModelAdapter.reviewAndPatch` signature (previousHunkRecords, compilerErrors, returns `{ hunks, droppedCount }`); `generate` gets `regenerationHint?`; new SSE events `verify_result`, `hunks_dropped`; session state gets `previousHunkRecords`, `compilerErrors`, `regenAttempted`
+- `src/lib/adapters/base.ts` — New `REVIEW_AND_PATCH_SYSTEM_PROMPT` requires `original_code` verbatim anchor; new `REVIEW_AND_PATCH_REVERIFY_SYSTEM_PROMPT` for rounds > 1 (FIXED/NOT_FIXED verdicts); `reviewAndPatch` sends numbered code, two code paths (initial/reverify); `parseReviewHunks` validates `original_code` against file content, drops bad anchors; `parseReReviewResponse` extracts NOT_FIXED hunks + new issues; `generate` threads `regenerationHint`
+- `src/lib/utils/hunk-merge.ts` — New exported `locateInFile(code, anchor, lineHint)` helper; `applyResolvedHunks` rewritten: anchor-based first, line-based fallback, returns `{ code, failedHunks }`; `mergeReviewHunks` uses `locate()` for overlap detection (anchor positions, not raw line hints); `toResolvedFromGroup` and `collapseGroup` carry `original_code` through
+- `src/lib/pipeline/phase3-patch.ts` — Removed model round-trip from primary path; deterministic apply via `applyResolvedHunks`; one model call only for `failedHunks`
+- `src/lib/pipeline/verify.ts` — NEW: `verifyFile(filename, code, acceptedFiles)` using TypeScript programmatic API; dynamic import for graceful degradation in production Docker; filters import-resolution false-positives
+- `src/lib/pipeline/phase3-review.ts` — Updated for new `reviewAndPatch` return type; accepts `previousHunkRecords` + `compilerErrors`; emits `hunks_dropped` when anchors dropped
+- `src/lib/pipeline/phase3-generate.ts` — Threads `regenerationHint` to `coderAdapter.generate`
+- `src/lib/pipeline/phase3-cross-review.ts` — `toResolved` now carries `original_code` from conflict
+- `src/lib/pipeline/orchestrator.ts` — `buildPreviousHunkRecords` helper; `buildRegenHint` helper; `phase3_patching` now: (a) applies deterministic patch, (b) builds `previousHunkRecords`, (c) runs `verifyFile`, (d) on round < 3: increments round → `phase3_reviewing` directly (collapses old `phase3_re_review`); on round 3 first failure: one regen attempt (regenAttempted=true) → `phase3_generating`; on round 3 second failure: arbitration; `resolveMicroGate`/`resolveArbitration` carry `original_code` in resolved hunks; `applyResolvedHunks` call sites updated for new return type
+- `scripts/test-hunk-merge.mjs` — Updated inline implementations for new anchor logic; new tests 8–11 covering anchor replacement, failed anchor, locateInFile positions, and anchor-based overlap detection
+
+### Test results
+- `npx tsc --noEmit`: zero errors
+- `node scripts/test-hunk-merge.mjs`: 36/36 passed
+
+### Decisions Made
+- `original_code` is optional on `ReviewHunk`/`ResolvedHunk` — backward compat for human-resolved hunks and old sessions; validation only runs on model-generated hunks where the anchor was model-provided
+- `applyResolvedHunks` falls back to line-based for hunks without `original_code` — never breaks existing behavior
+- `verifyFile` uses dynamic import so it degrades gracefully in standalone Docker (typescript is devDependency)
+- `phase3_re_review` kept in PipelinePhase enum (UI/reconnect compat) but never entered from happy path — `phase3_patching` transitions directly to `phase3_reviewing` (next round)
+- One regen before arbitration: `regenAttempted` flag in session state prevents infinite regen loops; regen prompt carries outstanding issues + compiler errors
+
+### Left Off At
+- TypeScript: zero errors. Tests: 36/36. No live run tested with this change yet.
+
+---
+
 ## Session 2026-07-05 (Live Testing + Conflict Path Verification)
 
 ### Completed
