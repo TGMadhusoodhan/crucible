@@ -54,6 +54,7 @@ function ensureFirstRun(home) {
 // ─── Port probe ───────────────────────────────────────────────────────────────
 
 function findFreePort(start) {
+  if (start > 65535) return Promise.reject(new Error('No free port available in range 1–65535'))
   return new Promise((resolve, reject) => {
     const srv = createServer()
     srv.once('error', (err) => {
@@ -189,7 +190,8 @@ async function cmdDoctor() {
 
   // Data directory
   const dd = dataDir(home)
-  check('Data directory', fs.existsSync(dd), dd + (fs.existsSync(dd) ? '' : ' (will be created on first start)'))
+  const ddExists = fs.existsSync(dd)
+  check('Data directory', ddExists, dd + (ddExists ? '' : ' (will be created on first start)'))
 
   // DB schema
   const dbPath = path.join(dd, 'crucible.db')
@@ -206,7 +208,7 @@ async function cmdDoctor() {
         db.close()
       } catch(e) { process.stdout.write(JSON.stringify({ ok: false, error: e.message })) }
     `
-    const res = spawnSync('node', ['-e', dbScript], { encoding: 'utf8' })
+    const res = spawnSync('node', ['-e', dbScript], { encoding: 'utf8', timeout: 5000 })
     try {
       const parsed = JSON.parse(res.stdout ?? '{}')
       check('DB schema', parsed.ok,
