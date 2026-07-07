@@ -168,7 +168,8 @@ export function FilesSection() {
   const [chatPrompt,   setChatPrompt]   = useState('')
   const [chatSending,  setChatSending]  = useState(false)
   const [chatError,    setChatError]    = useState<string | null>(null)
-  const [downloaded,   setDownloaded]   = useState(false)
+  const [downloaded,      setDownloaded]      = useState(false)
+  const [downloadingAll,  setDownloadingAll]  = useState(false)
   const chatLabelId = useId()
 
   const projectId = project?.id
@@ -190,6 +191,26 @@ export function FilesSection() {
     const id = setInterval(fetchFiles, 5000)
     return () => clearInterval(id)
   }, [fetchFiles])
+
+  async function downloadAll() {
+    if (!projectId || files.length === 0) return
+    setDownloadingAll(true)
+    try {
+      const res = await fetch(`/api/files/${projectId}?download=1`)
+      if (!res.ok) return
+      const blob = await res.blob()
+      const url  = URL.createObjectURL(blob)
+      const a    = document.createElement('a')
+      a.href     = url
+      a.download = files.length === 1
+        ? (files[0]?.path.split('/').pop() ?? 'file')
+        : 'crucible-output.zip'
+      a.click()
+      URL.revokeObjectURL(url)
+    } finally {
+      setDownloadingAll(false)
+    }
+  }
 
   async function selectFile(filepath: string) {
     if (activeFile === filepath) return
@@ -269,13 +290,26 @@ export function FilesSection() {
                 <span className="ml-1.5 text-zinc-700">({files.length})</span>
               )}
             </span>
-            <button
-              onClick={fetchFiles}
-              aria-label="Refresh file list"
-              className="font-mono text-[10px] text-zinc-700 hover:text-zinc-400 transition-colors"
-            >
-              ↻
-            </button>
+            <div className="flex items-center gap-2">
+              {files.length > 0 && (
+                <button
+                  onClick={() => void downloadAll()}
+                  disabled={downloadingAll}
+                  aria-label={files.length === 1 ? 'Download file' : 'Download all files as ZIP'}
+                  title={files.length === 1 ? 'Download file' : 'Download all as ZIP'}
+                  className="font-mono text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors disabled:opacity-40"
+                >
+                  {downloadingAll ? '…' : files.length === 1 ? '↓' : '↓ zip'}
+                </button>
+              )}
+              <button
+                onClick={fetchFiles}
+                aria-label="Refresh file list"
+                className="font-mono text-[10px] text-zinc-700 hover:text-zinc-400 transition-colors"
+              >
+                ↻
+              </button>
+            </div>
           </div>
           {workspaceDir && (
             <p
