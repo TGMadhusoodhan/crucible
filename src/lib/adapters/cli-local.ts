@@ -1,7 +1,6 @@
 import { spawn } from 'child_process'
 import os from 'os'
 import fs from 'fs'
-import path from 'path'
 import type { AlignmentMessage, Provider, ThinkingOutput } from '@/types'
 import { alignmentOutputSchema } from '@/lib/schemas'
 import {
@@ -11,7 +10,6 @@ import {
   buildAlignmentPrompt,
   buildThinkingPrompt,
   isUnparseableThinkingOutput,
-  parseJSON,
   parseThinkingOutput,
   parseWithRepair,
   type StreamUsage,
@@ -341,18 +339,15 @@ export class CliLocalAdapter extends BaseAdapter {
   // ─── Claude implementation ───────────────────────────────────────────────────
 
   private async claudeComplete(systemPrompt: string, userMsg: string): Promise<string> {
-    const combined = `${userMsg}`
     const { stdout } = await spawnCli(
       'claude',
-      ['-p', combined, '--system-prompt', systemPrompt, '--output-format', 'json', '--allowedTools', ''],
+      ['-p', userMsg, '--system-prompt', systemPrompt, '--output-format', 'json', '--allowedTools', ''],
       scrubEnv(),
     )
-    const { text, costUsd } = parseClaudeJsonEnvelope(stdout)
-    // Check for subscription limit in the envelope text
+    const { text } = parseClaudeJsonEnvelope(stdout)
     if (!text && stdout.includes('usage_limit')) {
       throw new SubscriptionLimitError('Claude subscription limit reached')
     }
-    void costUsd  // cost is reported via estimateCost bypass; no recordUsage here
     return text
   }
 
@@ -361,15 +356,13 @@ export class CliLocalAdapter extends BaseAdapter {
     userMsg:      string,
     onToken:      (token: string) => void,
   ): Promise<StreamUsage> {
-    const combined = `${userMsg}`
-    let costUsd = 0
     let rateLimitHit = false
     let retryAfterMs: number | undefined
 
     await spawnCliStreaming(
       'claude',
       [
-        '-p', combined,
+        '-p', userMsg,
         '--system-prompt', systemPrompt,
         '--verbose',
         '--output-format', 'stream-json',
@@ -380,7 +373,6 @@ export class CliLocalAdapter extends BaseAdapter {
       (line) => {
         const parsed = parseClaudeStreamEvent(line)
         if (parsed.token)        onToken(parsed.token)
-        if (parsed.costUsd)      costUsd = parsed.costUsd
         if (parsed.rateLimitHit) { rateLimitHit = true; retryAfterMs = parsed.retryAfterMs }
       },
     )
@@ -422,15 +414,8 @@ export class CliLocalAdapter extends BaseAdapter {
 
   async think(taskDescription: string, contextText?: string): Promise<ThinkingOutput> {
     const prompt = buildThinkingPrompt(taskDescription, contextText)
-    const release = await this.semaphore.acquire()
-    let raw: string
-    try {
-      raw = this.cliProvider === 'claude-code'
-        ? await this.claudeComplete(THINKING_SYSTEM_PROMPT, prompt)
-        : await this.codexComplete(THINKING_SYSTEM_PROMPT, prompt)
-    } finally {
-      release()
-    }
+    // completeNonStreaming handles the semaphore — don't acquire again here
+    const raw = await this.completeNonStreaming(THINKING_SYSTEM_PROMPT, prompt)
 
     const output = parseThinkingOutput(raw, this.cliProvider, this.modelId, 0)
     if (isUnparseableThinkingOutput(output)) {
@@ -463,19 +448,16 @@ export class CliLocalAdapter extends BaseAdapter {
     const prompt = buildAlignmentPrompt(round, taskDescription, myThinking, otherThinking)
     const raw    = await this.completeNonStreaming(ALIGNMENT_SYSTEM_PROMPT, prompt)
 
-    const parsed = parseJSON<Record<string, unknown>>(raw, 'alignment')
-    const schema = alignmentOutputSchema
-
     let validated
     try {
       validated = await parseWithRepair(
-        raw, schema,
+        raw, alignmentOutputSchema,
         (err) => this.completeNonStreaming(ALIGNMENT_SYSTEM_PROMPT,
           `Your previous response could not be parsed. Error: ${err}\nRespond with ONLY the corrected JSON — no markdown fences, no prose.`),
         'chat',
       )
     } catch {
-      return this.makeAlignmentMessage(round, 'reviewer', parsed ?? {})
+      return this.makeAlignmentMessage(round, 'reviewer', {})
     }
 
     return this.makeAlignmentMessage(round, 'reviewer', validated as Record<string, unknown>)

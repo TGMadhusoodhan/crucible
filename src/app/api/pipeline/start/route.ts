@@ -66,14 +66,6 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       )
     }
 
-    // CLI providers (claude-code, codex) can only be R1/R2 — never the coder.
-    // Defense in depth: the coder is hardcoded to DeepSeek, so this can't happen
-    // through the normal UI, but reject explicitly for API callers.
-    if (CLI_PROVIDERS.has(r1Provider) || CLI_PROVIDERS.has(r2Provider)) {
-      // Allowed — CLI providers are valid reviewers. Nothing to reject here.
-    }
-    // (coderProvider is always hardcoded to 'deepseek' — no check needed)
-
     const [[projectRow], [coderApiKey, r1ApiKey, r2ApiKey]] = await Promise.all([
       db.select({ workspaceDir: schema.projects.workspaceDir, name: schema.projects.name })
         .from(schema.projects)

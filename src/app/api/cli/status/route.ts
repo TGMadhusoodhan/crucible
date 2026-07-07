@@ -1,3 +1,6 @@
+import { existsSync } from 'fs'
+import { join } from 'path'
+import os from 'os'
 import { NextResponse } from 'next/server'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
@@ -5,6 +8,16 @@ import { isRunningInDocker } from '@/lib/adapters/cli-local'
 import type { ApiResponse } from '@/types'
 
 const execFileAsync = promisify(execFile)
+
+// Check Claude Code auth state from its stored credentials file — avoids a
+// live API call (which would burn subscription tokens on every Settings load).
+function claudeIsLoggedIn(): boolean {
+  const home = process.env.HOME ?? os.homedir()
+  return (
+    existsSync(join(home, '.claude', '.credentials.json')) ||
+    existsSync(join(home, '.claude', 'credentials.json'))
+  )
+}
 
 interface CliBackendStatus {
   available: boolean
@@ -20,7 +33,6 @@ interface CliStatusData {
 }
 
 async function checkClaude(): Promise<CliBackendStatus> {
-  // Check binary is present
   let version: string
   try {
     const { stdout } = await execFileAsync('claude', ['--version'], { timeout: 8_000 })
@@ -29,23 +41,12 @@ async function checkClaude(): Promise<CliBackendStatus> {
     return { available: false, reason: 'claude CLI not found — install Claude Code from claude.ai/download' }
   }
 
-  // Check auth: a very cheap non-interactive call
-  try {
-    await execFileAsync(
-      'claude',
-      ['-p', 'ping', '--output-format', 'json', '--allowedTools', ''],
-      { timeout: 15_000 },
-    )
-    return { available: true, version, loggedIn: true }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    // "not logged in" or auth errors come back via stderr / non-zero exit
-    const lower = msg.toLowerCase()
-    if (lower.includes('login') || lower.includes('auth') || lower.includes('oauth')) {
-      return { available: true, version, loggedIn: false, reason: 'Not logged in — run: claude login' }
-    }
-    // Any other error: binary present but status unknown
-    return { available: true, version, loggedIn: false, reason: msg.slice(0, 120) }
+  const loggedIn = claudeIsLoggedIn()
+  return {
+    available: true,
+    version,
+    loggedIn,
+    reason: loggedIn ? undefined : 'Not logged in — run: claude login',
   }
 }
 
