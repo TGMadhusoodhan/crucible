@@ -4,6 +4,9 @@ import { useCallback, useEffect, useState } from 'react'
 import { cn } from '@/lib/utils'
 import type { Provider } from '@/types'
 
+interface CliBackendStatus { available: boolean; version?: string; loggedIn?: boolean; reason?: string }
+interface CliStatusData { inDocker: boolean; claudeCode: CliBackendStatus; codex: CliBackendStatus }
+
 // AI providers shown in the main credentials list
 const AI_PROVIDERS: Provider[] = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together', 'zai']
 
@@ -14,16 +17,18 @@ const HIDDEN_PROVIDERS = new Set<Provider>(['mistral', 'openrouter', 'together']
 type CredentialProvider = Provider | 'github'
 
 const PROVIDER_LABELS: Record<CredentialProvider, string> = {
-  anthropic:  'Anthropic (Claude)',
-  openai:     'OpenAI (GPT)',
-  deepseek:   'DeepSeek',
-  google:     'Google (Gemini)',
-  mistral:    'Mistral / Codestral',
-  openrouter: 'OpenRouter (any model)',
-  groq:       'Groq',
-  together:   'Together AI',
-  zai:        'Z.ai (GLM)',
-  github:     'GitHub',
+  anthropic:     'Anthropic (Claude)',
+  openai:        'OpenAI (GPT)',
+  deepseek:      'DeepSeek',
+  google:        'Google (Gemini)',
+  mistral:       'Mistral / Codestral',
+  openrouter:    'OpenRouter (any model)',
+  groq:          'Groq',
+  together:      'Together AI',
+  zai:           'Z.ai (GLM)',
+  github:        'GitHub',
+  'claude-code': 'Claude Code (subscription)',
+  codex:         'Codex (subscription)',
 }
 
 const PROVIDER_KEY_HINT: Partial<Record<CredentialProvider, string>> = {
@@ -196,6 +201,112 @@ function GitHubCredential({
   )
 }
 
+function CliBackendRow({
+  label,
+  subtitle,
+  status,
+  setupNote,
+}: {
+  label:     string
+  subtitle:  string
+  status:    CliBackendStatus | null
+  setupNote: string
+}) {
+  const dot = !status
+    ? 'bg-zinc-700'
+    : status.loggedIn
+    ? 'bg-emerald-500'
+    : status.available
+    ? 'bg-amber-500'
+    : 'bg-zinc-700'
+
+  const statusLine = !status
+    ? 'Checking…'
+    : status.loggedIn
+    ? `Connected · ${status.version ?? ''}`
+    : status.available
+    ? (status.reason ?? 'Not authenticated')
+    : (status.reason ?? 'Not installed')
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
+      <div className="flex items-start gap-3">
+        <span className={cn('mt-1 h-2 w-2 shrink-0 rounded-full', dot)} />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-zinc-200">{label}</p>
+          <p className="text-[11px] text-zinc-500">{subtitle}</p>
+          <p className="mt-1 text-[11px] text-zinc-600">{statusLine}</p>
+          {status && !status.loggedIn && (
+            <p className="mt-1 font-mono text-[11px] text-zinc-500">{setupNote}</p>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function CliSubscriptionsSection() {
+  const [data, setData] = useState<CliStatusData | null>(null)
+
+  useEffect(() => {
+    fetch('/api/cli/status')
+      .then(r => r.json())
+      .then((res: { success: boolean; data?: CliStatusData }) => {
+        if (res.success && res.data) setData(res.data)
+      })
+      .catch(() => {})
+  }, [])
+
+  if (data?.inDocker) {
+    return (
+      <div className="mt-8 space-y-3">
+        <div>
+          <h3 className="text-sm font-semibold text-zinc-100">Subscription CLIs</h3>
+          <p className="mt-1 text-xs text-zinc-500">
+            Claude Code and Codex subscription backends are not available inside Docker. Run Crucible natively to use them.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="mt-8 space-y-4">
+      <div>
+        <h3 className="text-sm font-semibold text-zinc-100">Subscription CLIs (R1 / R2 only)</h3>
+        <p className="mt-1 text-xs text-zinc-500">
+          Use your Claude Pro/Max or ChatGPT plan as a reviewer — no API key required. These can only be selected as R1 or R2, never as the primary coder.
+        </p>
+      </div>
+
+      <div className="rounded-lg border border-zinc-700/50 bg-zinc-800/40 px-4 py-3 text-[11px] text-zinc-400 space-y-1">
+        <p className="font-medium text-zinc-300">Important caveats:</p>
+        <ul className="ml-3 space-y-0.5 list-disc">
+          <li>Each call starts a fresh CLI agent — expect 2–5s overhead vs. direct API</li>
+          <li>Draws from your plan's interactive token window (Claude: 5-hour; Codex: 5-hour)</li>
+          <li>Anthropic paused (not cancelled) separate metering — terms may change</li>
+          <li>Crucible never sees your credentials — it spawns your own logged-in CLIs</li>
+        </ul>
+      </div>
+
+      <div className="space-y-2">
+        <CliBackendRow
+          label="Claude Code (subscription)"
+          subtitle="Reviewer via your Claude Pro/Max plan · claude-code-default"
+          status={data?.claudeCode ?? null}
+          setupNote="$ claude login"
+        />
+        <CliBackendRow
+          label="Codex (subscription)"
+          subtitle="Reviewer via your ChatGPT plan · codex-default"
+          status={data?.codex ?? null}
+          setupNote="$ codex login"
+        />
+      </div>
+    </div>
+  )
+}
+
 export function CredentialsManager() {
   const [credentials, setCredentials] = useState<Credential[]>([])
   const [loading, setLoading]         = useState(true)
@@ -293,6 +404,9 @@ export function CredentialsManager() {
 
       {/* ─── GitHub section ──────────────────────────────────────────────────── */}
       {!loading && <GitHubCredential cred={connectedMap.get('github')} onAdd={() => setAdding('github')} onDelete={handleDelete} />}
+
+      {/* ─── CLI subscription section ─────────────────────────────────────────── */}
+      {!loading && <CliSubscriptionsSection />}
 
       {adding && (
         <AddKeyModal

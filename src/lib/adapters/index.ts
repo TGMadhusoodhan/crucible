@@ -1,4 +1,5 @@
 import { ClaudeAdapter } from './claude'
+import { CliLocalAdapter } from './cli-local'
 import { DeepSeekAdapter } from './deepseek'
 import { GoogleAdapter } from './google'
 import { MistralAdapter } from './mistral'
@@ -34,6 +35,8 @@ export function getAdapter(provider: Provider, modelId: string, apiKey: string):
     case 'groq':        return new GroqAdapter(modelId, apiKey)
     case 'together':    return new TogetherAdapter(modelId, apiKey)
     case 'zai':         return new ZAIAdapter(modelId, apiKey)
+    case 'claude-code': return new CliLocalAdapter('claude-code', modelId)
+    case 'codex':       return new CliLocalAdapter('codex', modelId)
     default: {
       const _exhaustive: never = provider
       throw new Error(`Unknown provider: ${String(_exhaustive)}`)

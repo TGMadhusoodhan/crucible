@@ -7,9 +7,12 @@ import { usePipeline } from '@/hooks/usePipeline'
 import { cn } from '@/lib/utils'
 import type { ConsensusOutput, Provider, SpecDocument } from '@/types'
 
-const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together', 'zai'] as const
+const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together', 'zai', 'claude-code', 'codex'] as const
 
 const HIDDEN_PROVIDERS = new Set<Provider>(['mistral', 'openrouter', 'together'])
+
+// CLI providers authenticate via the user's local CLI — no API key stored in Crucible
+const CLI_PROVIDERS = new Set<Provider>(['claude-code', 'codex'])
 
 // ─── Model catalogue ──────────────────────────────────────────────────────────
 
@@ -73,6 +76,12 @@ const PROVIDER_MODELS: Record<Provider, ModelOption[]> = {
     { id: 'glm-5.2',       label: 'GLM-5.2',        recommended: true, note: 'flagship' },
     { id: 'glm-5-turbo',   label: 'GLM-5 Turbo',    note: 'fast' },
     { id: 'glm-4.7-flash', label: 'GLM-4.7 Flash',  note: 'free tier' },
+  ],
+  'claude-code': [
+    { id: 'claude-code-default', label: 'Claude Code (subscription)', recommended: true, note: 'model follows your CLI config' },
+  ],
+  codex: [
+    { id: 'codex-default', label: 'Codex (subscription)', recommended: true, note: 'model follows your CLI config' },
   ],
 }
 
@@ -419,6 +428,13 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 function KeyBadge({ provider, credMap }: { provider: Provider; credMap: Record<string, boolean> }) {
+  if (CLI_PROVIDERS.has(provider)) {
+    return (
+      <span className="text-[10px] text-zinc-500">
+        subscription · no API key needed
+      </span>
+    )
+  }
   if (!(provider in credMap)) {
     return (
       <Link href="/settings" className="text-[10px] text-red-400 hover:underline">
@@ -465,8 +481,14 @@ function ModelSelect({
   const [loading,    setLoading]    = useState(false)
   const [error,      setError]      = useState('')
 
-  // Try to fetch real model IDs from the provider when it changes
+  // Try to fetch real model IDs from the provider when it changes.
+  // CLI providers use a fixed synthetic model id — skip the live fetch.
   useEffect(() => {
+    if (CLI_PROVIDERS.has(provider)) {
+      setLiveModels([])
+      setLoading(false)
+      return
+    }
     setLiveModels([])
     setError('')
     setLoading(true)

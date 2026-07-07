@@ -9,15 +9,17 @@ import type { Provider, ProviderBudget } from '@/types'
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const PROVIDER_LABELS: Record<Provider, string> = {
-  anthropic:  'Anthropic',
-  openai:     'OpenAI',
-  deepseek:   'DeepSeek',
-  google:     'Google',
-  mistral:    'Mistral',
-  openrouter: 'OpenRouter',
-  groq:       'Groq',
-  together:   'Together',
-  zai:        'Z.ai',
+  anthropic:     'Anthropic',
+  openai:        'OpenAI',
+  deepseek:      'DeepSeek',
+  google:        'Google',
+  mistral:       'Mistral',
+  openrouter:    'OpenRouter',
+  groq:          'Groq',
+  together:      'Together',
+  zai:           'Z.ai',
+  'claude-code': 'Claude Code',
+  codex:         'Codex',
 }
 
 const ALL_PROVIDERS: Provider[] = [

@@ -9,15 +9,17 @@ const ALL_PROVIDERS: Provider[] = [
 ]
 
 const PROVIDER_LABELS: Record<Provider, string> = {
-  anthropic:  'Anthropic (Claude)',
-  openai:     'OpenAI (GPT)',
-  deepseek:   'DeepSeek',
-  google:     'Google (Gemini)',
-  mistral:    'Mistral / Codestral',
-  openrouter: 'OpenRouter',
-  groq:       'Groq',
-  together:   'Together AI',
-  zai:        'Z.ai (GLM)',
+  anthropic:     'Anthropic (Claude)',
+  openai:        'OpenAI (GPT)',
+  deepseek:      'DeepSeek',
+  google:        'Google (Gemini)',
+  mistral:       'Mistral / Codestral',
+  openrouter:    'OpenRouter',
+  groq:          'Groq',
+  together:      'Together AI',
+  zai:           'Z.ai (GLM)',
+  'claude-code': 'Claude Code (subscription)',
+  codex:         'Codex (subscription)',
 }
 
 function usageColor(percentUsed: number) {

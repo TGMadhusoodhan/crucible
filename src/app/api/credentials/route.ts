@@ -47,7 +47,9 @@ async function validateApiKey(provider: CredentialProvider, apiKey: string): Pro
     openrouter: { url: 'https://openrouter.ai/api/v1/models',                      headers: { Authorization: `Bearer ${apiKey}` } },
     groq:       { url: 'https://api.groq.com/openai/v1/models',                    headers: { Authorization: `Bearer ${apiKey}` } },
     together:   { url: 'https://api.together.xyz/v1/models',                       headers: { Authorization: `Bearer ${apiKey}` } },
-    zai:        { url: 'https://api.z.ai/api/paas/v4/models',                      headers: { Authorization: `Bearer ${apiKey}` } },
+    zai:          { url: 'https://api.z.ai/api/paas/v4/models',                    headers: { Authorization: `Bearer ${apiKey}` } },
+    'claude-code': { url: '', headers: {} },  // no API key — CLI subscription
+    codex:         { url: '', headers: {} },  // no API key — CLI subscription
   }
   const { url, headers } = configs[provider as Provider]
   try {

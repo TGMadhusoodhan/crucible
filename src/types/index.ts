@@ -5,6 +5,7 @@ import { z } from 'zod'
 export type Provider =
   | 'anthropic' | 'openai' | 'deepseek' | 'google'
   | 'mistral'   | 'openrouter' | 'groq'  | 'together' | 'zai'
+  | 'claude-code' | 'codex'
 
 export type Plan = 'free' | 'indie' | 'pro' | 'team'
 
@@ -760,3 +761,4 @@ export type SSEEvent =
   | { type: 'budget_gate';          filename: string; fileIndex: number; totalFiles: number; spentUsd: number; remainingUsd: number; estimatedFileUsd: number }
   | { type: 'github_push_success';  sha: string; branch: string; url: string }
   | { type: 'github_push_failed';   message: string }
+  | { type: 'subscription_limit';   provider: 'claude-code' | 'codex'; retryAfterMs?: number }

@@ -13,7 +13,9 @@ const MODEL_ENDPOINTS: Record<Provider, { url: string; authHeader: (key: string)
   openrouter: { url: 'https://openrouter.ai/api/v1/models',                      authHeader: (k) => ({ Authorization: `Bearer ${k}` }) },
   groq:       { url: 'https://api.groq.com/openai/v1/models',                    authHeader: (k) => ({ Authorization: `Bearer ${k}` }) },
   together:   { url: 'https://api.together.xyz/v1/models',                       authHeader: (k) => ({ Authorization: `Bearer ${k}` }) },
-  zai:        { url: 'https://api.z.ai/api/paas/v4/models',                      authHeader: (k) => ({ Authorization: `Bearer ${k}` }) },
+  zai:          { url: 'https://api.z.ai/api/paas/v4/models',                    authHeader: (k) => ({ Authorization: `Bearer ${k}` }) },
+  'claude-code': { url: '', authHeader: () => ({}) },  // CLI subscription — no API endpoint
+  codex:         { url: '', authHeader: () => ({}) },  // CLI subscription — no API endpoint
 }
 
 export async function GET(

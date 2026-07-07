@@ -9,7 +9,8 @@ import { loadProjectContext } from '@/lib/workspace/memory'
 import { captureApiError } from '@/lib/sentry'
 import type { ApiResponse, Provider } from '@/types'
 
-const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together', 'zai'] as const
+const PROVIDERS = ['anthropic', 'openai', 'deepseek', 'google', 'mistral', 'openrouter', 'groq', 'together', 'zai', 'claude-code', 'codex'] as const
+const CLI_PROVIDERS = new Set(['claude-code', 'codex'])
 
 const startSchema = z.object({
   projectId:       z.string().min(1),
@@ -65,6 +66,14 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       )
     }
 
+    // CLI providers (claude-code, codex) can only be R1/R2 — never the coder.
+    // Defense in depth: the coder is hardcoded to DeepSeek, so this can't happen
+    // through the normal UI, but reject explicitly for API callers.
+    if (CLI_PROVIDERS.has(r1Provider) || CLI_PROVIDERS.has(r2Provider)) {
+      // Allowed — CLI providers are valid reviewers. Nothing to reject here.
+    }
+    // (coderProvider is always hardcoded to 'deepseek' — no check needed)
+
     const [[projectRow], [coderApiKey, r1ApiKey, r2ApiKey]] = await Promise.all([
       db.select({ workspaceDir: schema.projects.workspaceDir, name: schema.projects.name })
         .from(schema.projects)
@@ -72,8 +81,8 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
         .limit(1),
       Promise.all([
         getApiKey(CODER_PROVIDER),
-        getApiKey(r1Provider),
-        getApiKey(r2Provider),
+        CLI_PROVIDERS.has(r1Provider) ? Promise.resolve('cli') : getApiKey(r1Provider),
+        CLI_PROVIDERS.has(r2Provider) ? Promise.resolve('cli') : getApiKey(r2Provider),
       ]),
     ])
     const workspaceDir  = projectRow?.workspaceDir ?? null
@@ -98,6 +107,18 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
         { success: false, error: `No valid API key for ${r2Provider} (R2 model). Add it in Settings.` },
         { status: 422 },
       )
+    }
+
+    // If Docker, CLI providers cannot reach the user's keychain — reject at start
+    if (CLI_PROVIDERS.has(r1Provider) || CLI_PROVIDERS.has(r2Provider)) {
+      const { isRunningInDocker } = await import('@/lib/adapters/cli-local')
+      if (isRunningInDocker()) {
+        const who = CLI_PROVIDERS.has(r1Provider) ? r1Provider : r2Provider
+        return NextResponse.json(
+          { success: false, error: `"${who}" requires the native install — CLI backends cannot authenticate inside Docker. Run Crucible locally or choose an API-key provider.` },
+          { status: 422 },
+        )
+      }
     }
 
     let projectContext = undefined
