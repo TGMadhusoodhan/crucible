@@ -2,7 +2,7 @@
 
 > Bring any AI. Build better code.
 
-Crucible routes every coding task through two AI models from different companies. A **primary coder** generates the code. A **reviewer** from a different training family cross-validates it. Code only reaches you when both models agree.
+Crucible routes every coding task through three AI models: a **primary coder** (DeepSeek) generates the code, and **two independent reviewers** from different training families cross-validate it. Conflicts between reviewers are resolved before code reaches you.
 
 You bring your own API keys. Crucible is the pipeline.
 
@@ -18,11 +18,11 @@ crucible
 That's it. On first run, Crucible auto-generates an encryption key, creates `~/.crucible/`, starts the server on `http://localhost:3000`, and opens your browser. No manual setup.
 
 After the browser opens:
-1. Go to **Settings → API Keys** and add keys for at least two providers
-2. Click **New project** and choose your primary coder and reviewer models
+1. Go to **Settings → API Keys** and add keys for at least two reviewer providers
+2. Click **New project** and choose your R1 and R2 reviewer models
 3. Describe your task and click **Start pipeline**
 
-**Recommended first pairing:** DeepSeek V4 Pro (primary) + Claude Sonnet 4.6 (reviewer). Different training families, genuine blind spot coverage, and ~36M tokens for $25/month vs Claude Pro's 1–2M.
+**Recommended first pairing:** Claude Sonnet 4.6 (R1) + GPT-4o (R2). Different training families, genuine blind spot coverage. DeepSeek V4 Pro is locked in as the primary coder at ~$0.65/M blended.
 
 ### CLI reference
 
@@ -56,28 +56,33 @@ All data lives in `~/.crucible/` by default. Override with `CRUCIBLE_HOME=/path/
 
 ---
 
-## Why two models?
+## Why three models?
 
 Every model has blind spots baked in by its training data. The same model that wrote the bug is the one you're asking to find it. Crucible breaks that loop:
 
-- DeepSeek writes the code. Claude reviews it. Different companies, different training — genuine cross-validation.
-- The reviewer never rewrites. It flags issues and produces surgical edits; the coder evaluates each one.
-- When they disagree, they negotiate. When they can't resolve it, you decide.
+- DeepSeek generates the code. R1 and R2 review it independently. Different companies, different training — genuine cross-validation.
+- Each reviewer produces structured edit hunks. They never rewrite the whole file.
+- R1 and R2 then evaluate each other's proposed hunks. Agreements are applied automatically; genuine conflicts surface to you.
+- When rounds are exhausted, you decide: regenerate with guidance, accept as-is, or choose a side.
 
-The result: code that has been written, self-checked, independently reviewed, and disputed before it reaches you.
+The result: code that has been written, independently reviewed by two models, cross-validated, and disputed before it reaches you.
 
 ---
 
 ## Features
 
-- **Two-model planning** — Both models analyze your task in parallel and surface every ambiguous design decision before writing a line of code
-- **Cross-model code review** — Reviewer flags are structured JSON: severity, location, and a plain-English fix hint — never a full rewrite
-- **Surgical edits** — Reviewer produces exact code hunks; coder verifies each change individually
-- **Model dialogue** — Disagreements trigger a negotiation (up to 3 rounds) before escalating to you
-- **Per-file gate** — You review each generated file one at a time, request targeted changes, and accept when satisfied
-- **Human arbitration** — Unresolved conflicts surface both positions clearly. Your decision is final and injected directly into the pipeline
-- **Budget governor** — Per-provider spend caps with automatic mode switching so one heavy session can't exhaust your budget
-- **Any two providers** — DeepSeek, Claude, GPT, Gemini, Mistral, OpenRouter, Groq, Together AI — mix and match freely
+- **Three-model pipeline** — DeepSeek generates; two reviewers from different training families cross-validate, each independently, before comparing notes
+- **Dual independent review** — R1 and R2 each produce structured edit hunks in parallel; their hunks are cross-validated before any change is applied
+- **Cross-review conflict resolution** — R1 evaluates R2's hunks and vice versa; agreements auto-apply; genuine conflicts go to a human micro-gate
+- **Human micro-gate** — when R1 and R2 disagree, you see both positions and pick one before patching continues
+- **Per-file output gate** — each generated file is presented one at a time; send targeted feedback or accept; all files accepted → pipeline complete
+- **Human arbitration** — when rounds are exhausted, your decision is final and injected directly into the pipeline
+- **Workspace memory** — link a project to a local folder; Crucible maintains a `.crucible/` directory with a running interface index, decision log, and CRUCIBLE.md context file injected into every session
+- **GitHub integration** — connect a GitHub repo to a project; accepted files push automatically (per-file or per-session) via your Personal Access Token
+- **CLI subscription backends** — use Claude Code or Codex as R1/R2 reviewers with your existing subscription — no API key required for those slots
+- **Budget governor** — per-provider spend caps with automatic mode switching so one heavy session can't exhaust your budget
+- **ZIP download** — download all accepted files as a ZIP with one click from the Files section
+- **Any reviewer providers** — Claude, GPT, Gemini, Mistral, OpenRouter, Groq, Together AI, Z.ai — mix and match freely
 
 ---
 
@@ -109,6 +114,8 @@ docker compose logs -f
 
 All project data is written to `/data` inside the container, mounted as the `crucible_data` volume.
 
+> **Note:** CLI subscription backends (claude-code, codex) are unavailable in Docker — they require a locally installed CLI on the host.
+
 ---
 
 ## How the pipeline works
@@ -117,27 +124,32 @@ Crucible runs through four phases. You only provide input at the marked gates �
 
 ```
 Phase 1 — Think
-  Both models analyze your task independently in parallel.
+  Both reviewers analyze your task independently in parallel.
   Each produces assumptions, questions, and a recommended approach.
 
 Phase 1.5 — Align
-  Models compare interpretations and flag architectural disagreements.
+  Reviewers compare interpretations and flag architectural disagreements.
   Mismatches surface here, before a single line of code is written.
 
-Phase 2 — Q&A + Spec                         ← Gate: you answer questions
+Phase 2 — Q&A + Spec                           ← Gate 1: you answer questions
   Required questions are presented once.
-  You answer them and confirm the generated spec.
-  Non-required questions are auto-answered using each model's recommendation.
+  You answer them; non-required questions are auto-answered.
+  R1 and R2 jointly propose a spec and file manifest.
+                                                ← Gate 2: you confirm the spec
 
-Phase 3 — Generate + Review loop
-  Primary generates code (streaming, with up to 2 self-check passes).
-  Reviewer cross-validates and produces surgical edit hunks.
-  Coder evaluates each hunk.
-  Disputed hunks trigger model dialogue (up to 3 rounds).
-  Unresolved disputes escalate to you.                ← Gate: arbitration
+Phase 3 — Generate + Review loop (per file, rounds 1–3)
+  DeepSeek generates the current file (streaming).
+  R1 and R2 each independently review + produce surgical edit hunks (parallel).
+  R1 evaluates R2's hunks; R2 evaluates R1's hunks (cross-review).
+  Agreed hunks are applied. Conflicting hunks go to:
+                                                ← Gate 3: micro-gate (R1 vs R2 conflict)
+  DeepSeek applies resolved patches.
+  R1+R2 verify the patched file. Next round if issues remain.
+  After round 3, if still unresolved:
+                                                ← Gate 4: arbitration (regenerate / pick side / accept)
 
-File Gate                                             ← Gate: per-file review
-  Each generated file is presented one at a time.
+Output gate                                     ← Gate 5: per-file approval
+  Each completed file is presented one at a time.
   Send targeted feedback for changes, or accept.
   All files accepted → pipeline complete.
 ```
@@ -146,22 +158,22 @@ File Gate                                             ← Gate: per-file review
 
 | Phase | What happens | Your input? |
 |---|---|---|
-| `phase1_thinking` | Both models analyze the task in parallel | — |
-| `phase1_5_alignment` | Models reconcile interpretations (max 2 rounds) | — |
+| `phase1_thinking` | R1 and R2 analyze the task in parallel | — |
+| `phase1_5_alignment` | Reviewers reconcile interpretations (max 2 rounds) | — |
 | `phase2_questions` | Questions compiled; non-required ones auto-answered | — |
-| `phase2_answering` | You answer required questions | **Yes** |
-| `phase2_contradictions` | Contradiction check on your answers | — |
-| `phase2_spec` | Deterministic spec built from questions + answers | — |
-| `phase2_spec_confirm` | You confirm the spec before generation starts | **Yes** |
-| `phase3_generating` | Primary streams code | — |
-| `phase3_self_check` | Primary checks its own output (max 2 passes) | — |
-| `phase3_reviewing` | Reviewer cross-validates against the spec | — |
-| `phase3_reviewer_edit` | Reviewer produces surgical edit hunks | — |
-| `phase3_coder_verify` | Primary evaluates reviewer's proposed changes | — |
-| `phase3_dialogue` | Models negotiate disagreements (max 3 rounds) | — |
-| `phase3_consensus` | Code promoted; file gate begins | — |
-| `phase3_file_gate` | You review each file and request changes | **Yes** |
-| `conflict_escalated` | Both positions shown; you decide | **Yes** |
+| `phase2_answering` | You answer required questions | **Gate 1** |
+| `phase2_contradiction_check` | Contradiction check on your answers | — |
+| `phase2_spec_and_manifest` | R1+R2 jointly propose spec + file manifest | — |
+| `phase2_confirm` | You confirm the spec before generation starts | **Gate 2** |
+| `phase3_generating` | DeepSeek streams the current file | — |
+| `phase3_reviewing` | R1+R2 independently review+patch in parallel | — |
+| `phase3_cross_review` | R1+R2 evaluate each other's conflicting hunks | — |
+| `phase3_micro_gate` | R1 and R2 disagree; you choose | **Gate 3** |
+| `phase3_patching` | DeepSeek applies resolved patches | — |
+| `phase3_re_review` | R1+R2 verify patched file | — |
+| `phase3_arbitration` | Round 3 exhausted; regenerate / pick side / accept as-is | **Gate 4** |
+| `phase3_budget_gate` | Authorize spend before each file (CRITICAL mode) | **Gate (budget)** |
+| `output_gate` | You review each completed file; request changes or accept | **Gate 5** |
 | `complete` | All files accepted | — |
 
 ---
@@ -183,18 +195,34 @@ File Gate                                             ← Gate: per-file review
 
 ### Supported providers
 
-Add API keys under **Settings → API Keys**.
+Add API keys under **Settings → API Keys**. R1 and R2 can use any combination of these providers.
 
-| Provider | Models |
+| Provider | Models / Notes |
 |---|---|
-| DeepSeek | `deepseek-v4-pro`, `deepseek-v4-flash` |
+| DeepSeek | `deepseek-v4-pro`, `deepseek-v4-flash` — primary coder (fixed) |
 | Anthropic | `claude-sonnet-4-6`, `claude-opus-4-7` |
 | OpenAI | `gpt-4o`, `gpt-5-4`, `gpt-5-5` |
 | Google | `gemini-pro`, `gemini-flash` |
 | Mistral | `mistral-large`, `codestral` |
+| Z.ai | `zai` models via z.ai |
 | OpenRouter | any model via openrouter.ai |
 | Groq | fast inference models |
 | Together AI | together.ai models |
+| **Claude Code** | uses your local `claude` CLI — no API key needed |
+| **Codex** | uses your local `codex` CLI — no API key needed |
+
+> R1 and R2 must use different providers to ensure genuine cross-validation.
+
+### CLI subscription backends
+
+If you have an active Claude Pro or Codex subscription, you can use those as R1 or R2 without any API key:
+
+1. Install the CLI: `npm install -g @anthropic-ai/claude-code` or `npm install -g @openai/codex`
+2. Log in once via the CLI
+3. In Crucible's Settings → CLI Subscriptions, verify detection shows the correct version and login state
+4. When creating a project, select **Claude Code** or **Codex** as R1 or R2
+
+Latency is higher than API calls (cold start per request). Not available in Docker.
 
 ### Budget governor
 
@@ -208,6 +236,31 @@ Crucible tracks spend per provider and switches modes automatically.
 | `CRITICAL` | < 25% | Budget gate before each file; spend + estimated cost shown |
 
 Set per-provider monthly caps under **Settings → Budget**.
+
+### Workspace memory
+
+When you link a project to a local folder, Crucible maintains a `.crucible/` directory inside it:
+
+```
+your-project/
+└── .crucible/
+    ├── CRUCIBLE.md        # auto-updated context injected into every session
+    ├── registry.json      # interface index: exported symbols + signatures per file
+    ├── history.jsonl      # append-only session event log
+    └── spec.json          # locked spec from Phase 2
+```
+
+On each session resume, the interface index provides R1, R2, and DeepSeek with the signatures of already-accepted files — enabling cross-file type checking and preventing duplicate symbol definitions without reading entire files.
+
+### GitHub integration
+
+Connect a GitHub repo to a project under the **GitHub** tab in project settings:
+
+1. Add a GitHub Personal Access Token under **Settings → API Keys**
+2. Open a project → **GitHub** tab → link an existing repo or create a new one
+3. Choose push mode: **per file** (push each accepted file immediately) or **per session** (push all at pipeline complete)
+
+Accepted files are committed and pushed to the configured branch automatically.
 
 ---
 
@@ -279,19 +332,11 @@ For native installs: `~/.crucible/secret.key` must never be deleted or overwritt
 
 ---
 
-### File gate shows no code
-
-**Cause:** The model's output wasn't parsed into named file blocks. Multi-file output must use `=== FILE: path ===` … `=== /FILE ===` delimiters.
-
-**Fix:** For single-file tasks, the full response is stored as `output.txt` — this is expected.
-
----
-
 ### Files section is empty after the pipeline completes
 
-**Cause:** Individual files are only written when you accept each file at the gate.
+**Cause:** Individual files are only written when you accept each file at the output gate.
 
-**Fix:** Refresh the Files page. If still empty, open the Conversation tab and confirm consensus was reached.
+**Fix:** Refresh the Files page. If still empty, open the Conversation tab and confirm consensus was reached for each file.
 
 ---
 
@@ -322,7 +367,7 @@ docker compose logs     # read the startup error
 Adding a new model provider touches one file and requires no pipeline changes.
 
 1. Create `src/lib/adapters/your-provider.ts`
-2. Extend `OpenAICompatibleAdapter` if the provider uses the OpenAI API shape (Groq, Together, DeepSeek, and Mistral all do). Otherwise extend `BaseAdapter` directly.
+2. Extend `OpenAICompatibleAdapter` if the provider uses the OpenAI API shape (Groq, Together, DeepSeek, Mistral, and Z.ai all do). Otherwise extend `BaseAdapter` directly.
 3. Implement `getProvider()` and any methods that need provider-specific behaviour. Everything else inherits.
 4. Add your provider to the `switch` in `src/lib/adapters/index.ts`
 
@@ -332,8 +377,8 @@ Adding a new model provider touches one file and requires no pipeline changes.
 
 ```bash
 git checkout -b feature/my-change
-npx tsx test-logic.mts     # logic tests, no API keys needed
-npx tsc --noEmit           # must be zero errors before opening a PR
+npm test                       # unit tests, no API keys needed
+npx tsc --noEmit               # must be zero errors before opening a PR
 ```
 
 - **New provider:** See [Adding a provider](#adding-a-provider) above — four steps, one file.
